@@ -20,7 +20,7 @@ jobs:
       - name: test
         run: cargo test
       - name: Lint
-        run: cargo clippy --all-targets --no-deps -D warnings
+        run: cargo clippy --all-targets --no-deps -- -D warnings
   build-windows:
     runs-on: windows-latest
     strategy:
@@ -49,4 +49,4 @@ jobs:
         if: (matrix.arch != 'aarch64') && (matrix.channel != 'nightly')
         run: cargo test --verbose --target ${{ matrix.arch }}-pc-windows-${{ matrix.variant }}
       - name: Lint
-        run: cargo clippy --all-targets --no-deps -D warnings
+        run: cargo clippy --all-targets --no-deps -- -D warnings
