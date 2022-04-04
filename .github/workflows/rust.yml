@@ -14,7 +14,10 @@ jobs:
         os: [ubuntu, macos]
     steps:
       - uses: actions/checkout@v2
-      - run: rustup default ${{ matrix.channel }}
+      - name: rustup default
+        run: rustup default ${{ matrix.channel }}
+      - name: rustup components
+        run: rustup component add clippy
       - name: build
         run: cargo build --verbose --all-targets
       - name: test
@@ -40,6 +43,8 @@ jobs:
         if: matrix.variant == 'gnu'
       - run: rustup default ${{ matrix.channel }}
       - run: rustup target add ${{ matrix.arch }}-pc-windows-${{ matrix.variant }}
+      - name: rustup components
+        run: rustup component add clippy
       - name: Build
         run: cargo build --verbose --target ${{ matrix.arch }}-pc-windows-${{ matrix.variant }}
       - name: Run tests (nightly)
