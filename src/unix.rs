@@ -1,7 +1,8 @@
 use std::{
+    ffi::CString,
     fs::File,
     io::Result,
-    os::unix::prelude::{AsRawFd, FromRawFd},
+    os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
     path::Path,
 };
 
@@ -26,43 +27,76 @@ pub mod exports {
     pub use libc::mode_t;
 }
 
-struct CString(std::ffi::CString);
+trait PathFFI {
+    fn as_cstring(&self) -> Result<CString>;
+}
 
-impl TryFrom<&Path> for CString {
-    type Error = std::io::Error;
-
-    fn try_from(value: &Path) -> std::result::Result<Self, Self::Error> {
-        // This is messy and probably needs a revisit.
-        // Path is an OsStr
-        Ok(CString(std::ffi::CString::new(
-            value.as_os_str().to_str().unwrap(),
-        )?))
+impl PathFFI for Path {
+    fn as_cstring(&self) -> Result<CString> {
+        std::ffi::CString::new(self.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct OpenOptionsImpl {
+    create: bool,
     mode: Option<mode_t>,
 }
 
 impl OpenOptionsImpl {
+    pub fn create(&mut self, create: bool) {
+        self.create = create;
+    }
+
+    pub fn open_at(&self, d: &mut File, path: &Path) -> Result<File> {
+        let path = path.as_cstring()?;
+        let mode = self.mode.unwrap_or(0o777);
+        // Some / all of these need to become OpenOptions controls.
+        let mut flags = libc::O_CLOEXEC | libc::O_RDONLY | libc::O_NOFOLLOW;
+        if self.create {
+            flags |= libc::O_CREAT;
+        }
+        // TODO
+        // Consider using openat2 on Linux... though that requires direct
+        // syscall usage today. https://man7.org/linux/man-pages/man2/openat2.2.html
+        let fd = cvt_r(|| unsafe { openat64(d.as_raw_fd(), path.as_ptr(), flags, mode as c_int) })?;
+
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
     /// One note: as the widespread unix interfaces don't offer atomic
     /// create-and-open, there is a race condition here (which is bad as this
     /// crate exists to target race conditions). Possibly addressable by a
     /// create-random + atomic move into place, but it isn't clear that this
     /// interface should hide that. mkdirat2 does not exist yet, though patch
-    /// sets have been proposed.
-    pub fn mkdirat(&self, f: &mut File, path: &Path) -> Result<File> {
-        let path = &CString::try_from(path)?.0;
+    /// sets have been proposed. The second wart is that a non-O_EXCL mode
+    /// doesn't exist: mkdir_at() fails if the target exists and is a dir
+    /// already.
+    pub fn mkdir_at(&self, d: &mut File, path: &Path) -> Result<File> {
+        let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
         // create
-        cvt_r(|| unsafe { mkdirat(f.as_raw_fd(), path.as_ptr(), mode) })?;
+        match cvt_r(|| unsafe { mkdirat(d.as_raw_fd(), path.as_ptr(), mode) }) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // IFF exclusive wasn't requested (currently the default), then
+                // proceed to open-as-dir and return existing dir.
+                if self.create {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }?;
+
         // Consider using openat2 on Linux... though that requires direct
         // syscall usage today. https://man7.org/linux/man-pages/man2/openat2.2.html
         let flags = libc::O_CLOEXEC | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY;
 
         // and open to return it
-        let fd = cvt_r(|| unsafe { openat64(f.as_raw_fd(), path.as_ptr(), flags, mode as c_int) })?;
+        let fd = cvt_r(|| unsafe { openat64(d.as_raw_fd(), path.as_ptr(), flags, mode as c_int) })?;
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 }
@@ -86,7 +120,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
     let mut options = OpenOptions::default();
     options.mode(0o700); // Only permit the euid to access the directory.
-    let dir_file = options.mkdirat(&mut parent_dir, "foo");
+    let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
     */
     fn mode(&mut self, mode: mode_t) -> &mut Self;
@@ -121,7 +155,7 @@ mod tests {
         rename(parent, &renamed_parent)?;
         let mut create_opt = OpenOptions::default();
         create_opt.mode(0o700);
-        let child: File = create_opt.mkdirat(&mut parent_file, "child")?;
+        let child: File = create_opt.mkdir_at(&mut parent_file, "child")?;
         let expected = renamed_parent.join("child");
         let metadata = expected.symlink_metadata()?;
         assert!(metadata.is_dir());
