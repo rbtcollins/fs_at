@@ -1,17 +1,19 @@
-# At calls for Rust
+# `*_at` syscalls for Rust (*nix and Windows)
 
 The Rust standard library does not (yet) offer at filesystem calls as a core
 feature. For instance `mkdirat`. These calls are essential for writing race-free
 filesystem code, since otherwise the state of the filesystem path that
 operations are executed against can change silently, leading to TOC-TOU race
 conditions. For Unix these calls are readily available in the libc crate, but
-for Windows some more plumbing is needed, which this crate provides.
+for Windows some more plumbing is needed. This crate provides a unified
+Rust-y interface to these calls.
 
 ## Usage
 
-See the crate [docs](https://docs.rs/fs_at).
+See the crate [docs](https://docs.rs/fs_at). But in short: use
+`fs_at::OpenOptions`, similar to `std::fs::OpenOptions`.
 
-## Vs other crates
+## vs other crates
 
 ### openat
 
