@@ -58,6 +58,26 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the option for write access.
+    ///
+    /// This option, when true, will indicate that the file should be write-able
+    /// if opened.
+    ///
+    /// If the file already exists, the write pointer will be set to 0. The file
+    /// won't be truncated.
+    ///
+    /// This option on its own is not enough to create a new file.
+    ///
+    /// ```no_compile
+    /// use fs_at::OpenOptions;
+    ///
+    /// let file = OpenOptions::default().write(true).open("foo.txt");
+    /// ```
+    pub fn write(&mut self, write: bool) -> &mut Self {
+        self._impl.write(write);
+        self
+    }
+
     /// Set the option to create a new file when missing, while still opening
     /// existing files.
     pub fn create(&mut self, create: bool) -> &mut Self {
@@ -119,7 +139,7 @@ pub mod testsupport;
 mod tests {
     use std::{
         fs::{rename, File},
-        io::{Error, ErrorKind, Result},
+        io::{Error, ErrorKind, Result, Write},
         path::PathBuf,
     };
 
@@ -148,6 +168,7 @@ mod tests {
         // perform an open call on a file
         OpenFile,
         // perform an open call on a dir ? [should this be extension only?]
+        #[allow(unused)]
         OpenDir,
     }
 
@@ -155,6 +176,7 @@ mod tests {
     struct Test<'a> {
         pub create: bool,
         pub read: bool,
+        pub write: bool,
         pub op: Op,
         pub err: Option<&'a Error>,
     }
@@ -167,6 +189,11 @@ mod tests {
 
         fn read(mut self, read: bool) -> Self {
             self.read = read;
+            self
+        }
+
+        fn write(mut self, write: bool) -> Self {
+            self.write = write;
             self
         }
 
@@ -204,13 +231,16 @@ mod tests {
         if test.read {
             options.read(true);
         }
+        if test.write {
+            options.write(true);
+        }
 
         let res = match test.op {
             Op::MkDir => options.mkdir_at(&mut parent_file, "child"),
             Op::OpenDir => unimplemented!(),
             Op::OpenFile => options.open_at(&mut parent_file, "child"),
         };
-        let _child = match (res, err) {
+        let mut child = match (res, err) {
             (Ok(child), None) => child,
             (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
             (Err(e), None) => panic!("unexpected error {:?}", e),
@@ -227,6 +257,10 @@ mod tests {
             Op::OpenFile => {
                 assert!(metadata.is_file());
                 assert_eq!(metadata.len(), 0);
+                if test.write {
+                    eprintln!("testing writes");
+                    child.write(b"some data\n")?;
+                }
             }
         }
         Ok(())
@@ -266,13 +300,16 @@ mod tests {
         for err_ref in vec![None, Some(&err)].into_iter() {
             for create in vec![false, true] {
                 for read in vec![false, true] {
-                    check_behaviour(
-                        Test::default()
-                            .err(err_ref)
-                            .create(create)
-                            .read(read)
-                            .op(Op::MkDir),
-                    )?;
+                    for write in vec![false, true] {
+                        check_behaviour(
+                            Test::default()
+                                .err(err_ref)
+                                .create(create)
+                                .read(read)
+                                .write(write)
+                                .op(Op::MkDir),
+                        )?;
+                    }
                 }
             }
         }
@@ -285,18 +322,21 @@ mod tests {
         for err_ref in vec![None, Some(&err)].into_iter() {
             for create in vec![false, true] {
                 for read in vec![false, true] {
-                    // Filter for open: without one of read/write/append all
-                    // calls will fail
-                    if !read {
-                        continue;
+                    for write in vec![false, true] {
+                        // Filter for open: without one of read/write/append all
+                        // calls will fail
+                        if !read && !write {
+                            continue;
+                        }
+                        check_behaviour(
+                            Test::default()
+                                .err(err_ref)
+                                .create(create)
+                                .read(read)
+                                .write(write)
+                                .op(Op::OpenFile),
+                        )?;
                     }
-                    check_behaviour(
-                        Test::default()
-                            .err(err_ref)
-                            .create(create)
-                            .read(read)
-                            .op(Op::OpenFile),
-                    )?;
                 }
             }
         }

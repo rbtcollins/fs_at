@@ -1,7 +1,8 @@
 mod sugar;
 
 use std::{
-    ffi, fmt,
+    ffi::c_void,
+    fmt,
     fs::File,
     io::Result,
     mem::{size_of, zeroed, MaybeUninit},
@@ -13,6 +14,7 @@ use std::{
 use ntapi::ntioapi::{
     FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS,
     FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+    FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use winapi::{
     ctypes,
@@ -24,7 +26,7 @@ use winapi::{
         DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, GENERIC_READ,
         GENERIC_WRITE, PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE,
-        SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE,
+        SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
     },
 };
 
@@ -44,6 +46,7 @@ pub mod exports {
 pub(crate) struct OpenOptionsImpl {
     create: bool,
     read: bool,
+    write: bool,
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
@@ -76,6 +79,10 @@ struct CreateOptions(u32);
 impl OpenOptionsImpl {
     pub fn read(&mut self, read: bool) {
         self.read = read;
+    }
+
+    pub fn write(&mut self, write: bool) {
+        self.write = write;
     }
 
     pub fn create(&mut self, create: bool) {
@@ -174,8 +181,7 @@ impl OpenOptionsImpl {
         match information {
             FILE_CREATED | FILE_OPENED => {
                 // success, we have an FD
-                Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut ffi::c_void) })
-                // Ok(unsafe { File::from_raw_handle(handle) })
+                Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut c_void) })
             }
 
             FILE_OVERWRITTEN | FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
@@ -207,7 +213,10 @@ impl OpenOptionsImpl {
         let desired_access = self.get_access_mode()?;
         let create_disposition = self.get_file_disposition();
         // create options needs to be controlled through OpenOptions too.
-        let create_options = CreateOptions(FILE_NON_DIRECTORY_FILE);
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        let create_options = CreateOptions(FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
 
         self.do_create_file(f, path, desired_access, create_disposition, create_options)
     }
@@ -227,10 +236,10 @@ impl OpenOptionsImpl {
         const ERROR_INVALID_PARAMETER: i32 = 87;
 
         // match (self.read, self.write, self.append, self.access_mode) {
-        Ok(DesiredAccess(match (self.read, false, false, None) {
+        let mut desired_access = DesiredAccess(match (self.read, self.write, false, None) {
             (.., Some(mode)) => mode,
             (true, false, false, None) => GENERIC_READ,
-            (false, true, false, None) => GENERIC_WRITE,
+            (false, true, false, None) => GENERIC_WRITE | FILE_GENERIC_WRITE,
             (true, true, false, None) => GENERIC_READ | GENERIC_WRITE,
             (false, true, true, None) => FILE_GENERIC_WRITE,
             (false, _, true, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
@@ -239,7 +248,12 @@ impl OpenOptionsImpl {
             (false, false, false, None) => {
                 return Err(std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER))
             }
-        }))
+        });
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        desired_access.0 |= SYNCHRONIZE;
+        Ok(desired_access)
     }
 
     fn with_security_qos<F>(&mut self, mutator: F)
