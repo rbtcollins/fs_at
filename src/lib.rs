@@ -43,6 +43,39 @@ pub struct OpenOptions {
     _impl: OpenOptionsImpl,
 }
 
+/// Controls the way writes to an opened file are performed. Write modes do not
+/// affect how the file is opened - creating the file or truncating it require
+/// separate options.
+#[derive(Clone, Copy, Default, Debug, PartialEq, PartialOrd)]
+pub enum OpenOptionsWriteMode {
+    /// No writing permitted. Allows opening files where the process lacks write permissions, and attempts to write will fail.
+    #[default]
+    None,
+    /// Writes permitted. The file location pointer tracked by the OS determines
+    /// where writes in the file will take place.
+    Write,
+    /// Writes permitted. The OS will place each write at the current end of the
+    /// file. These may still change the file location pointer, so if reads are
+    /// being used as well, be sure to seek to the desired location before
+    /// reading. One way to do this is to use seek to save the file location
+    /// pointer (`seek(SeekFrom::Current(0))`) and then apply the result before
+    /// the next read.
+    ///
+    /// Most OSes make these writes atomically, such that different threads or
+    /// even processes can collaborate safely on a single file, as long as each
+    /// write call provides a full unit of data (e.g. a line, or a binary struct
+    /// etc). This can be done by building up the data to write, or using a
+    /// buffered writer that is large enough and calling flush after each unit
+    /// is complete.
+    ///
+    /// ```no_compile
+    /// use std::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(OpenOptionsWriteMode::Append).open_at(&mut parent, "foo.txt");
+    /// ```
+    Append,
+}
+
 impl OpenOptions {
     /// Sets the option for read access.
     ///
@@ -51,7 +84,7 @@ impl OpenOptions {
     /// ```no_compile
     /// use fs_at::OpenOptions;
     ///
-    /// let file = OpenOptions::default().read(true).open_at(parent, "foo");
+    /// let file = OpenOptions::default().read(true).open_at(&mut parent, "foo");
     /// ```
     pub fn read(&mut self, read: bool) -> &mut Self {
         self._impl.read(read);
@@ -60,20 +93,16 @@ impl OpenOptions {
 
     /// Sets the option for write access.
     ///
-    /// This option, when true, will indicate that the file should be write-able
-    /// if opened.
-    ///
-    /// If the file already exists, the write pointer will be set to 0. The file
-    /// won't be truncated.
+    /// See [`OpenOptionsWriteMode`] for the details of each mode.
     ///
     /// This option on its own is not enough to create a new file.
     ///
     /// ```no_compile
     /// use fs_at::OpenOptions;
     ///
-    /// let file = OpenOptions::default().write(true).open("foo.txt");
+    /// let file = OpenOptions::default().write(OpenOptionsWriteMode::Write).open_at(&mut parent, "foo.txt");
     /// ```
-    pub fn write(&mut self, write: bool) -> &mut Self {
+    pub fn write(&mut self, write: OpenOptionsWriteMode) -> &mut Self {
         self._impl.write(write);
         self
     }
@@ -139,13 +168,13 @@ pub mod testsupport;
 mod tests {
     use std::{
         fs::{rename, File},
-        io::{Error, ErrorKind, Result, Write},
+        io::{Error, ErrorKind, Result, Seek, SeekFrom, Write},
         path::PathBuf,
     };
 
     use tempfile::TempDir;
 
-    use crate::{testsupport::open_dir, OpenOptions};
+    use crate::{testsupport::open_dir, OpenOptions, OpenOptionsWriteMode};
 
     /// Create a directory parent, open it, then rename it to renamed-parent and
     /// create another directory in its place. returns the file handle and the
@@ -176,7 +205,7 @@ mod tests {
     struct Test<'a> {
         pub create: bool,
         pub read: bool,
-        pub write: bool,
+        pub write: OpenOptionsWriteMode,
         pub op: Op,
         pub err: Option<&'a Error>,
     }
@@ -192,7 +221,7 @@ mod tests {
             self
         }
 
-        fn write(mut self, write: bool) -> Self {
+        fn write(mut self, write: OpenOptionsWriteMode) -> Self {
             self.write = write;
             self
         }
@@ -231,9 +260,7 @@ mod tests {
         if test.read {
             options.read(true);
         }
-        if test.write {
-            options.write(true);
-        }
+        options.write(test.write);
 
         let res = match test.op {
             Op::MkDir => options.mkdir_at(&mut parent_file, "child"),
@@ -257,10 +284,17 @@ mod tests {
             Op::OpenFile => {
                 assert!(metadata.is_file());
                 assert_eq!(metadata.len(), 0);
-                if test.write {
-                    eprintln!("testing writes");
+                if test.write != OpenOptionsWriteMode::None {
+                    child.seek(SeekFrom::Start(10))?;
                     child.write(b"some data\n")?;
+                    if test.write == OpenOptionsWriteMode::Write {
+                        assert_eq!(expected.symlink_metadata()?.len(), 20);
+                    } else {
+                        // The write location is ignored in append mode
+                        assert_eq!(expected.symlink_metadata()?.len(), 10);
+                    }
                 }
+                //
             }
         }
         Ok(())
@@ -300,7 +334,11 @@ mod tests {
         for err_ref in vec![None, Some(&err)].into_iter() {
             for create in vec![false, true] {
                 for read in vec![false, true] {
-                    for write in vec![false, true] {
+                    for write in vec![
+                        OpenOptionsWriteMode::None,
+                        OpenOptionsWriteMode::Write,
+                        OpenOptionsWriteMode::Append,
+                    ] {
                         check_behaviour(
                             Test::default()
                                 .err(err_ref)
@@ -322,10 +360,14 @@ mod tests {
         for err_ref in vec![None, Some(&err)].into_iter() {
             for create in vec![false, true] {
                 for read in vec![false, true] {
-                    for write in vec![false, true] {
+                    for write in vec![
+                        OpenOptionsWriteMode::None,
+                        OpenOptionsWriteMode::Write,
+                        OpenOptionsWriteMode::Append,
+                    ] {
                         // Filter for open: without one of read/write/append all
                         // calls will fail
-                        if !read && !write {
+                        if !read && write == OpenOptionsWriteMode::None {
                             continue;
                         }
                         check_behaviour(

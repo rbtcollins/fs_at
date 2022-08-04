@@ -21,6 +21,7 @@ use winapi::{
     shared::{
         minwindef::ULONG,
         ntdef::{NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
+        winerror::ERROR_INVALID_PARAMETER,
     },
     um::winnt::{
         DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
@@ -32,7 +33,7 @@ use winapi::{
 
 use sugar::{NTStatusError, OSUnicodeString};
 
-use crate::OpenOptions;
+use crate::{OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -46,7 +47,7 @@ pub mod exports {
 pub(crate) struct OpenOptionsImpl {
     create: bool,
     read: bool,
-    write: bool,
+    write: OpenOptionsWriteMode,
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
@@ -81,7 +82,7 @@ impl OpenOptionsImpl {
         self.read = read;
     }
 
-    pub fn write(&mut self, write: bool) {
+    pub fn write(&mut self, write: OpenOptionsWriteMode) {
         self.write = write;
     }
 
@@ -230,30 +231,30 @@ impl OpenOptionsImpl {
         create_disposition
     }
 
-    // Very similar to rust itself. The only obvious way to do it.
-    // But not identical, because write sense being honoured makes sense to me.
     fn get_access_mode(&self) -> Result<DesiredAccess> {
-        const ERROR_INVALID_PARAMETER: i32 = 87;
-
-        // match (self.read, self.write, self.append, self.access_mode) {
-        let mut desired_access = DesiredAccess(match (self.read, self.write, false, None) {
-            (.., Some(mode)) => mode,
-            (true, false, false, None) => GENERIC_READ,
-            (false, true, false, None) => GENERIC_WRITE | FILE_GENERIC_WRITE,
-            (true, true, false, None) => GENERIC_READ | GENERIC_WRITE,
-            (false, true, true, None) => FILE_GENERIC_WRITE,
-            (false, _, true, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
-            (true, true, true, None) => GENERIC_READ | FILE_GENERIC_WRITE,
-            (true, _, true, None) => GENERIC_READ | (FILE_GENERIC_WRITE & !FILE_WRITE_DATA),
-            (false, false, false, None) => {
-                return Err(std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER))
-            }
-        });
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
         // requires SYNCHRONIZE on the access mode.
-        desired_access.0 |= SYNCHRONIZE;
-        Ok(desired_access)
+        let mut desired_access = SYNCHRONIZE;
+        if self.read {
+            desired_access |= GENERIC_READ;
+        }
+
+        // rust has match (self.read, self.write, self.append, self.access_mode) {
+        desired_access |= match (self.write, None) {
+            (.., Some(mode)) => mode,
+            (OpenOptionsWriteMode::Write, None) => GENERIC_WRITE,
+            (OpenOptionsWriteMode::Append, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
+            _ => 0,
+        };
+
+        if desired_access == SYNCHRONIZE {
+            // neither read nor write modes selected
+            return Err(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_PARAMETER as i32,
+            ));
+        }
+        Ok(DesiredAccess(desired_access))
     }
 
     fn with_security_qos<F>(&mut self, mutator: F)
