@@ -42,6 +42,15 @@ when it is finished.
 
 PR's as normal on Github.
 
+Coverage - consider grcov.
+
+```rust
+export RUSTFLAGS="-Cinstrument-coverage"
+export LLVM_PROFILE_FILE="fs-at-%p-%m.profraw"
+cargo test && grcov . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing -o ./target/debug/cove
+rage/
+```
+
 ## Code of conduct
 
 Please note that this project is released with a Contributor Code of Conduct. By

@@ -43,6 +43,7 @@ pub mod exports {
 #[derive(Default)]
 pub(crate) struct OpenOptionsImpl {
     create: bool,
+    read: bool,
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
@@ -73,6 +74,10 @@ struct FileDisposition(u32);
 struct CreateOptions(u32);
 
 impl OpenOptionsImpl {
+    pub fn read(&mut self, read: bool) {
+        self.read = read;
+    }
+
     pub fn create(&mut self, create: bool) {
         self.create = create;
     }
@@ -222,7 +227,7 @@ impl OpenOptionsImpl {
         const ERROR_INVALID_PARAMETER: i32 = 87;
 
         // match (self.read, self.write, self.append, self.access_mode) {
-        Ok(DesiredAccess(match (true, false, false, None) {
+        Ok(DesiredAccess(match (self.read, false, false, None) {
             (.., Some(mode)) => mode,
             (true, false, false, None) => GENERIC_READ,
             (false, true, false, None) => GENERIC_WRITE,
@@ -278,6 +283,7 @@ pub trait OpenOptionsExt {
 
     let mut options = OpenOptions::default();
     options.allocation_size(12345);
+    options.read(true);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
     */
@@ -306,6 +312,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.file_attributes(winapi::um::winnt::FILE_ATTRIBUTE_TEMPORARY);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -332,6 +339,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.object_attributes(winapi::shared::ntdef::OBJ_CASE_INSENSITIVE);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -372,6 +380,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_impersonation(winapi::um::winnt::SecurityIdentification);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -399,6 +408,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_context_tracking(winapi::um::winnt::SECURITY_DYNAMIC_TRACKING);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -426,6 +436,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_effective_only(true);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
