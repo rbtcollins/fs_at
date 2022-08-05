@@ -8,13 +8,10 @@ use std::{
 
 // This will probably take a few iterations to get right. The idea: always use
 // an openat64, and import the right variant for the platform. See File::open_c in [`std::sys::unix::fs`].
-cfg_if::cfg_if! {
-    if #[cfg(target_os="macos")] {
-        use libc::openat as openat64;
-    } else {
-        use libc::openat64;
-    }
-}
+#[cfg(target_os = "macos")]
+use libc::openat as openat64;
+#[cfg(not(target_os = "macos"))]
+use libc::openat64;
 
 use cvt::cvt_r;
 use libc::{c_int, mkdirat, mode_t};

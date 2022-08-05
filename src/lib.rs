@@ -19,17 +19,17 @@ use std::{
     path::Path,
 };
 
-cfg_if::cfg_if! {
-    if #[cfg(windows)] {
-        mod win;
+#[cfg(windows)]
+mod win;
 
-        use win::OpenOptionsImpl;
-    } else {
-        mod unix;
+#[cfg(windows)]
+use win::OpenOptionsImpl;
 
-        use unix::OpenOptionsImpl;
-    }
-}
+#[cfg(unix)]
+mod unix;
+
+#[cfg(unix)]
+use unix::OpenOptionsImpl;
 
 /// Similar to [`std::fs::OpenOptions`], this struct is used to parameterise the
 /// various at functions, which are then called on the struct itself. Typical
@@ -199,13 +199,10 @@ impl OpenOptions {
 }
 
 pub mod os {
-    cfg_if::cfg_if! {
-        if #[cfg(windows)] {
-            pub use crate::win::exports as windows;
-        } else {
-            pub use crate::unix::exports as unix;
-        }
-    }
+    #[cfg(unix)]
+    pub use crate::unix::exports as unix;
+    #[cfg(windows)]
+    pub use crate::win::exports as windows;
 }
 
 #[cfg(test)]
