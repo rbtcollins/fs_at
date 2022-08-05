@@ -234,22 +234,20 @@ impl OpenOptionsImpl {
 
     fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
         if self.create_new {
-            return Ok(FileDisposition(FILE_CREATE));
+            Ok(FileDisposition(FILE_CREATE))
         } else if self.truncate {
-            return Ok(FileDisposition(FILE_OVERWRITE_IF));
+            Ok(FileDisposition(FILE_OVERWRITE_IF))
         } else if self.create {
-            return Ok(FileDisposition(FILE_OPEN_IF));
+            Ok(FileDisposition(FILE_OPEN_IF))
+        } else if call_defaults_create {
+            // mkdir should still work without create / truncate called -
+            // its poor ergonomics otherwise.
+            Ok(FileDisposition(FILE_CREATE))
         } else {
-            if call_defaults_create {
-                // mkdir should still work without create / truncate called -
-                // its poor ergonomics otherwise.
-                return Ok(FileDisposition(FILE_CREATE));
-            }
-            return Err(std::io::Error::from_raw_os_error(
+            Err(std::io::Error::from_raw_os_error(
                 ERROR_INVALID_PARAMETER as i32,
-            ));
+            ))
         }
-        // let file_disposition = FileDisposition(FILE_CREATE);
     }
 
     fn get_access_mode(&self) -> Result<DesiredAccess> {
