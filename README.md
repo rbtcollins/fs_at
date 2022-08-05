@@ -8,6 +8,12 @@ conditions. For Unix these calls are readily available in the libc crate, but
 for Windows some more plumbing is needed. This crate provides a unified
 Rust-y interface to these calls.
 
+## MSRV policy
+
+I'll keep this compiling against older rusts as long as it is easy, but not at
+the expense of a lot of code golf, or past CVEs in old releases of dependencies.
+Currently MSRV is 1.62.
+
 ## Usage
 
 See the crate [docs](https://docs.rs/fs_at). But in short: use
