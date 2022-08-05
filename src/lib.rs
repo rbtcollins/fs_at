@@ -46,7 +46,7 @@ pub struct OpenOptions {
 /// Controls the way writes to an opened file are performed. Write modes do not
 /// affect how the file is opened - creating the file or truncating it require
 /// separate options.
-#[derive(Clone, Copy, Default, Debug, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Default, Debug, Eq, PartialEq, PartialOrd)]
 pub enum OpenOptionsWriteMode {
     /// No writing permitted. Allows opening files where the process lacks write permissions, and attempts to write will fail.
     #[default]
