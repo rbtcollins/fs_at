@@ -61,12 +61,14 @@ pub enum OpenOptionsWriteMode {
     /// pointer (`seek(SeekFrom::Current(0))`) and then apply the result before
     /// the next read.
     ///
-    /// Most OSes make these writes atomically, such that different threads or
-    /// even processes can collaborate safely on a single file, as long as each
-    /// write call provides a full unit of data (e.g. a line, or a binary struct
-    /// etc). This can be done by building up the data to write, or using a
-    /// buffered writer that is large enough and calling flush after each unit
-    /// is complete.
+    /// Most OSes and filesystems make these writes atomically, such that
+    /// different threads or even processes can collaborate safely on a single
+    /// file, as long as each write call provides a full unit of data (e.g. a
+    /// line, or a binary struct etc). This can be done by building up the data
+    /// to write, or using a buffered writer that is large enough and calling
+    /// flush after each unit is complete.
+    ///
+    /// In particular NFS on Linux is documented as not providing atomic appends.
     ///
     /// ```no_compile
     /// use std::fs::OpenOptions;
@@ -137,7 +139,9 @@ impl OpenOptions {
     /// pathname, whether links or directories.
     ///
     /// This is performed by the OS as an atomic operation, providing safety
-    /// against TOCTOU conditions.
+    /// against TOCTOU conditions. Whether this will occur as an atomic
+    /// operation depends on the OS and filesystem in use. In particular NFS
+    /// versions below 3 do not support the needed operations for atomicity.
     ///
     /// Unlike the Rust stdlib, an options with write set to
     /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.

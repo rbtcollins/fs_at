@@ -19,7 +19,7 @@ cfg_if::cfg_if! {
 use cvt::cvt_r;
 use libc::{c_int, mkdirat, mode_t};
 
-use crate::OpenOptions;
+use crate::{OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -40,23 +40,70 @@ impl PathFFI for Path {
 
 #[derive(Debug, Default)]
 pub(crate) struct OpenOptionsImpl {
+    read: bool,
+    write: OpenOptionsWriteMode,
+    truncate: bool,
     create: bool,
+    create_new: bool,
     mode: Option<mode_t>,
 }
 
 impl OpenOptionsImpl {
+    pub fn read(&mut self, read: bool) {
+        self.read = read;
+    }
+
+    pub fn write(&mut self, write: OpenOptionsWriteMode) {
+        self.write = write;
+    }
+
+    pub fn truncate(&mut self, truncate: bool) {
+        self.truncate = truncate;
+    }
+
     pub fn create(&mut self, create: bool) {
         self.create = create;
+    }
+
+    pub fn create_new(&mut self, create_new: bool) {
+        self.create_new = create_new;
+    }
+
+    fn get_flags(&self) -> Result<c_int> {
+        let data_flags = match (self.read, self.write) {
+            (false, OpenOptionsWriteMode::Write) => Ok(libc::O_WRONLY),
+            (false, OpenOptionsWriteMode::Append) => Ok(libc::O_WRONLY | libc::O_APPEND),
+            (false, OpenOptionsWriteMode::None) => {
+                Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+            }
+            (true, OpenOptionsWriteMode::None) => Ok(libc::O_RDONLY),
+            (true, OpenOptionsWriteMode::Write) => Ok(libc::O_RDWR),
+            (true, OpenOptionsWriteMode::Append) => Ok(libc::O_RDWR | libc::O_APPEND),
+        }?;
+
+        let create_flags = if self.create_new {
+            libc::O_EXCL | libc::O_CREAT
+        } else if self.truncate {
+            libc::O_CREAT | libc::O_TRUNC
+        } else if self.create {
+            libc::O_CREAT
+        } else {
+            0
+        };
+
+        // Some / all of these need to become OpenOptions controls.
+        let common_flags = libc::O_CLOEXEC | libc::O_NOCTTY;
+        // We should add an extension to suppport libc::O_PATH as NtCreateFile
+        // has a matching capability.
+        // Similarly O_TMPFILE
+        Ok(data_flags | create_flags | common_flags)
     }
 
     pub fn open_at(&self, d: &mut File, path: &Path) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
-        // Some / all of these need to become OpenOptions controls.
-        let mut flags = libc::O_CLOEXEC | libc::O_RDONLY | libc::O_NOFOLLOW;
-        if self.create {
-            flags |= libc::O_CREAT;
-        }
+        let flags = self.get_flags()?;
+
         // TODO
         // Consider using openat2 on Linux... though that requires direct
         // syscall usage today. https://man7.org/linux/man-pages/man2/openat2.2.html
