@@ -309,7 +309,7 @@ mod tests {
                         .create(true)
                         .write(OpenOptionsWriteMode::Write)
                         .open_at(&mut parent_file, "child")?;
-                    first_file.write(b"existing content")?;
+                    assert_eq!(16, first_file.write(b"existing content")?);
                     first_file.flush()?;
                 }
             }
@@ -359,7 +359,7 @@ mod tests {
                 }
                 if test.write != OpenOptionsWriteMode::None {
                     child.seek(SeekFrom::Start(10))?;
-                    child.write(b"some data\n")?;
+                    assert_eq!(10, child.write(b"some data\n")?);
                     if test.write == OpenOptionsWriteMode::Write {
                         assert_eq!(expected.symlink_metadata()?.len(), 20);
                     } else {
@@ -387,12 +387,12 @@ mod tests {
             // error likewise operating on an existing symlink
             _check_behaviour(test.clone(), false, None)?;
             let err = Error::from(ErrorKind::AlreadyExists);
-            _check_behaviour(test.clone(), true, Some(&err))
+            _check_behaviour(test, true, Some(&err))
         } else if test.create || test.truncate {
             // run two tests: one that creates the path, and once that opens
             // the existing path
             _check_behaviour(test.clone(), true, None)?;
-            _check_behaviour(test.clone(), false, None)
+            _check_behaviour(test, false, None)
         } else {
             // without create/create_new/truncate, openat is only useful on
             // existing files.
@@ -403,56 +403,58 @@ mod tests {
             // and one that precreates the file and expects an error
             _check_behaviour(test.clone(), false, None)?;
             let err = Error::from(ErrorKind::AlreadyExists);
-            _check_behaviour(test.clone(), true, Some(&err))
+            _check_behaviour(test, true, Some(&err))
         }
     }
 
     #[test]
     fn all_mkdir() -> Result<()> {
-        for create in vec![false, true] {
-            for read in vec![false, true] {
-                for write in vec![
-                    OpenOptionsWriteMode::None,
-                    OpenOptionsWriteMode::Write,
-                    OpenOptionsWriteMode::Append,
-                ] {
-                    check_behaviour(
-                        Test::default()
-                            .create(create)
-                            .read(read)
-                            .write(write)
-                            .op(Op::MkDir),
-                    )?;
+        for create in &[false, true] {
+            for create_new in &[false, true] {
+                for read in &[false, true] {
+                    for write in &[
+                        OpenOptionsWriteMode::None,
+                        OpenOptionsWriteMode::Write,
+                        OpenOptionsWriteMode::Append,
+                    ] {
+                        check_behaviour(
+                            Test::default()
+                                .create(*create)
+                                .create_new(*create_new)
+                                .read(*read)
+                                .write(*write)
+                                .op(Op::MkDir),
+                        )?;
+                    }
                 }
             }
-            // }
         }
         Ok(())
     }
 
     #[test]
     fn all_open_file() -> Result<()> {
-        for create in vec![false, true] {
-            for create_new in vec![false, true] {
-                for read in vec![false, true] {
-                    for write in vec![
+        for create in &[false, true] {
+            for create_new in &[false, true] {
+                for read in &[false, true] {
+                    for write in &[
                         OpenOptionsWriteMode::None,
                         OpenOptionsWriteMode::Write,
                         OpenOptionsWriteMode::Append,
                     ] {
-                        for truncate in vec![false, true] {
+                        for truncate in &[false, true] {
                             // Filter for open: without one of read/write/append all
                             // calls will fail
-                            if !read && write == OpenOptionsWriteMode::None {
+                            if !read && *write == OpenOptionsWriteMode::None {
                                 continue;
                             }
                             check_behaviour(
                                 Test::default()
-                                    .create(create)
-                                    .create_new(create_new)
-                                    .read(read)
-                                    .write(write)
-                                    .truncate(truncate)
+                                    .create(*create)
+                                    .create_new(*create_new)
+                                    .read(*read)
+                                    .write(*write)
+                                    .truncate(*truncate)
                                     .op(Op::OpenFile),
                             )?;
                         }
