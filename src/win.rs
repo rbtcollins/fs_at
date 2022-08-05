@@ -13,8 +13,8 @@ use std::{
 
 use ntapi::ntioapi::{
     FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS,
-    FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
-    FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_OVERWRITTEN,
+    FILE_SUPERSEDED, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use winapi::{
     ctypes,
@@ -46,6 +46,7 @@ pub mod exports {
 #[derive(Default)]
 pub(crate) struct OpenOptionsImpl {
     create: bool,
+    truncate: bool,
     read: bool,
     write: OpenOptionsWriteMode,
     // LARGE_INTEGER defined as signed 64-bit
@@ -84,6 +85,10 @@ impl OpenOptionsImpl {
 
     pub fn write(&mut self, write: OpenOptionsWriteMode) {
         self.write = write;
+    }
+
+    pub fn truncate(&mut self, truncate: bool) {
+        self.truncate = truncate;
     }
 
     pub fn create(&mut self, create: bool) {
@@ -180,12 +185,12 @@ impl OpenOptionsImpl {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match information {
-            FILE_CREATED | FILE_OPENED => {
+            FILE_CREATED | FILE_OPENED | FILE_OVERWRITTEN => {
                 // success, we have an FD
                 Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut c_void) })
             }
 
-            FILE_OVERWRITTEN | FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
+            FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
                 unimplemented!("expected FILE_CREATED|FILE_OPENED|FILE_OVERWRITTEN|FILE_SUPERSEDED|FILE_EXISTS|FILE_DOES_NOT_EXIST, got {}", status_block.Information);
             }
 
@@ -199,7 +204,7 @@ impl OpenOptionsImpl {
         // get_access_mode must not be used for opening a directory
         // ... see docs or we must have file use the Ext trait always.
         let desired_access = DesiredAccess(DELETE | FILE_LIST_DIRECTORY | FILE_TRAVERSE);
-        let mut create_disposition = self.get_file_disposition();
+        let mut create_disposition = self.get_file_disposition(true)?;
         if create_disposition.0 & (FILE_CREATE | FILE_OPEN_IF) == 0 {
             // per docs: create/open/openif required to open a dir, and this
             // function - mkdir - only creates. Permit users to opt into
@@ -212,7 +217,7 @@ impl OpenOptionsImpl {
 
     pub fn open_at(&self, f: &mut File, path: &Path) -> Result<File> {
         let desired_access = self.get_access_mode()?;
-        let create_disposition = self.get_file_disposition();
+        let create_disposition = self.get_file_disposition(false)?;
         // create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
@@ -222,13 +227,22 @@ impl OpenOptionsImpl {
         self.do_create_file(f, path, desired_access, create_disposition, create_options)
     }
 
-    fn get_file_disposition(&self) -> FileDisposition {
-        let mut create_disposition = FileDisposition(0);
-        if self.create {
-            create_disposition.0 |= FILE_OPEN_IF;
+    fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
+        if self.truncate {
+            return Ok(FileDisposition(FILE_OVERWRITE_IF));
+        } else if self.create {
+            return Ok(FileDisposition(FILE_OPEN_IF));
+        } else {
+            if call_defaults_create {
+                // mkdir should still work without create / truncate called -
+                // its poor ergonomics otherwise.
+                return Ok(FileDisposition(FILE_CREATE));
+            }
+            return Err(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_PARAMETER as i32,
+            ));
         }
         // let file_disposition = FileDisposition(FILE_CREATE);
-        create_disposition
     }
 
     fn get_access_mode(&self) -> Result<DesiredAccess> {

@@ -107,6 +107,24 @@ impl OpenOptions {
         self
     }
 
+    /// Sets the option for truncating a previous file.
+    ///
+    /// If a file is successfully opened with this option set it will truncate the file to 0 length if it already exists.
+    ///
+    /// The file must be opened with write access for truncate to work.
+    ///
+    /// Behaviour of truncate on directories and symlink files is undefined.
+    ///
+    /// ```no_compile
+    /// use std::fs::OpenOptions;
+    ///
+    /// let file = OpenOptions::new().write(OpenOptionsWriteMode::Append).truncate(true).open_at(&mut parent, "foo.txt");
+    /// ```
+    pub fn truncate(&mut self, truncate: bool) -> &mut Self {
+        self._impl.truncate(truncate);
+        self
+    }
+
     /// Set the option to create a new file when missing, while still opening
     /// existing files.
     pub fn create(&mut self, create: bool) -> &mut Self {
@@ -206,6 +224,7 @@ mod tests {
         pub create: bool,
         pub read: bool,
         pub write: OpenOptionsWriteMode,
+        pub truncate: bool,
         pub op: Op,
         pub err: Option<&'a Error>,
     }
@@ -223,6 +242,11 @@ mod tests {
 
         fn write(mut self, write: OpenOptionsWriteMode) -> Self {
             self.write = write;
+            self
+        }
+
+        fn truncate(mut self, truncate: bool) -> Self {
+            self.truncate = truncate;
             self
         }
 
@@ -251,7 +275,14 @@ mod tests {
                     options.mkdir_at(&mut parent_file, "child")?;
                 }
                 Op::OpenDir => (),
-                Op::OpenFile => (),
+                Op::OpenFile => {
+                    let mut first_file = OpenOptions::default()
+                        .create(true)
+                        .write(OpenOptionsWriteMode::Write)
+                        .open_at(&mut parent_file, "child")?;
+                    first_file.write(b"existing content")?;
+                    first_file.flush()?;
+                }
             }
         }
         if test.create {
@@ -261,6 +292,9 @@ mod tests {
             options.read(true);
         }
         options.write(test.write);
+        if test.truncate {
+            options.truncate(true);
+        }
 
         let res = match test.op {
             Op::MkDir => options.mkdir_at(&mut parent_file, "child"),
@@ -283,7 +317,14 @@ mod tests {
             Op::OpenDir => (),
             Op::OpenFile => {
                 assert!(metadata.is_file());
-                assert_eq!(metadata.len(), 0);
+                // If the file was truncated, it will be 0-length.
+                // If the file is new it will be 0-length.
+                let initial_length = metadata.len();
+                if test.truncate || !create_in_advance {
+                    assert_eq!(initial_length, 0);
+                } else {
+                    assert_eq!(initial_length, 16);
+                }
                 if test.write != OpenOptionsWriteMode::None {
                     child.seek(SeekFrom::Start(10))?;
                     child.write(b"some data\n")?;
@@ -291,7 +332,7 @@ mod tests {
                         assert_eq!(expected.symlink_metadata()?.len(), 20);
                     } else {
                         // The write location is ignored in append mode
-                        assert_eq!(expected.symlink_metadata()?.len(), 10);
+                        assert_eq!(expected.symlink_metadata()?.len(), initial_length + 10);
                     }
                 }
                 //
@@ -365,19 +406,22 @@ mod tests {
                         OpenOptionsWriteMode::Write,
                         OpenOptionsWriteMode::Append,
                     ] {
-                        // Filter for open: without one of read/write/append all
-                        // calls will fail
-                        if !read && write == OpenOptionsWriteMode::None {
-                            continue;
+                        for truncate in vec![false, true] {
+                            // Filter for open: without one of read/write/append all
+                            // calls will fail
+                            if !read && write == OpenOptionsWriteMode::None {
+                                continue;
+                            }
+                            check_behaviour(
+                                Test::default()
+                                    .err(err_ref)
+                                    .create(create)
+                                    .read(read)
+                                    .write(write)
+                                    .truncate(truncate)
+                                    .op(Op::OpenFile),
+                            )?;
                         }
-                        check_behaviour(
-                            Test::default()
-                                .err(err_ref)
-                                .create(create)
-                                .read(read)
-                                .write(write)
-                                .op(Op::OpenFile),
-                        )?;
                     }
                 }
             }
