@@ -126,9 +126,34 @@ impl OpenOptions {
     }
 
     /// Set the option to create a new file when missing, while still opening
-    /// existing files.
+    /// existing files. Unlike the Rust stdlib, an options with write set to
+    /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.
     pub fn create(&mut self, create: bool) -> &mut Self {
         self._impl.create(create);
+        self
+    }
+
+    /// Set the option to create a new file, rejecting existing entries at the
+    /// pathname, whether links or directories.
+    ///
+    /// This is performed by the OS as an atomic operation, providing safety
+    /// against TOCTOU conditions.
+    ///
+    /// Unlike the Rust stdlib, an options with write set to
+    /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.
+    ///
+    /// ```no_compile
+    /// use fs_at::OpenOptions;
+    ///
+    /// let file = OpenOptions::default().write(OpenOptionsWriteMode::Write)
+    ///                              .create_new(true)
+    ///                              .open_at(&mut parent, "foo.txt");
+    /// let dir = OpenOptions::default()
+    ///                              .create_new(true)
+    ///                              .mkdir_at(&mut parent, "foo.txt");
+    /// ```
+    pub fn create_new(&mut self, create_new: bool) -> &mut Self {
+        self._impl.create_new(create_new);
         self
     }
 
@@ -220,18 +245,23 @@ mod tests {
     }
 
     #[derive(Default, Debug, Clone)]
-    struct Test<'a> {
+    struct Test {
         pub create: bool,
+        pub create_new: bool,
         pub read: bool,
         pub write: OpenOptionsWriteMode,
         pub truncate: bool,
         pub op: Op,
-        pub err: Option<&'a Error>,
     }
 
-    impl<'a> Test<'a> {
+    impl Test {
         fn create(mut self, create: bool) -> Self {
             self.create = create;
+            self
+        }
+
+        fn create_new(mut self, create_new: bool) -> Self {
+            self.create_new = create_new;
             self
         }
 
@@ -252,11 +282,6 @@ mod tests {
 
         fn op(mut self, op: Op) -> Self {
             self.op = op;
-            self
-        }
-
-        fn err(mut self, err: Option<&'a Error>) -> Self {
-            self.err = err;
             self
         }
     }
@@ -287,6 +312,9 @@ mod tests {
         }
         if test.create {
             options.create(true);
+        }
+        if test.create_new {
+            options.create_new(true);
         }
         if test.read {
             options.read(true);
@@ -349,57 +377,59 @@ mod tests {
     // semantics down for when races do occur (e.g. O_EXCL is supplied when
     // requested...)
     fn check_behaviour(test: Test) -> Result<()> {
-        if test.create {
+        if test.create_new {
+            // run three tests: one that creates the path, and one that expects
+            // an error operating on the existing path, and one that expects an
+            // error likewise operating on an existing symlink
+            _check_behaviour(test.clone(), false, None)?;
+            let err = Error::from(ErrorKind::AlreadyExists);
+            _check_behaviour(test.clone(), true, Some(&err))
+        } else if test.create || test.truncate {
             // run two tests: one that creates the path, and once that opens
             // the existing path
             _check_behaviour(test.clone(), true, None)?;
             _check_behaviour(test.clone(), false, None)
         } else {
-            // without create, openat is only useful on existing files.
+            // without create/create_new/truncate, openat is only useful on
+            // existing files.
             if test.op != Op::MkDir {
                 return Ok(());
             }
-            // choose one of two tests: one that creates the path where it didn't exist
+            // run two tests: one that creates the path where it didn't exist
             // and one that precreates the file and expects an error
-            if test.err.is_none() {
-                _check_behaviour(test.clone(), false, None)
-            } else {
-                _check_behaviour(test.clone(), true, test.err)
-            }
+            _check_behaviour(test.clone(), false, None)?;
+            let err = Error::from(ErrorKind::AlreadyExists);
+            _check_behaviour(test.clone(), true, Some(&err))
         }
     }
 
     #[test]
     fn all_mkdir() -> Result<()> {
-        let err = Error::from(ErrorKind::AlreadyExists);
-        for err_ref in vec![None, Some(&err)].into_iter() {
-            for create in vec![false, true] {
-                for read in vec![false, true] {
-                    for write in vec![
-                        OpenOptionsWriteMode::None,
-                        OpenOptionsWriteMode::Write,
-                        OpenOptionsWriteMode::Append,
-                    ] {
-                        check_behaviour(
-                            Test::default()
-                                .err(err_ref)
-                                .create(create)
-                                .read(read)
-                                .write(write)
-                                .op(Op::MkDir),
-                        )?;
-                    }
+        for create in vec![false, true] {
+            for read in vec![false, true] {
+                for write in vec![
+                    OpenOptionsWriteMode::None,
+                    OpenOptionsWriteMode::Write,
+                    OpenOptionsWriteMode::Append,
+                ] {
+                    check_behaviour(
+                        Test::default()
+                            .create(create)
+                            .read(read)
+                            .write(write)
+                            .op(Op::MkDir),
+                    )?;
                 }
             }
+            // }
         }
         Ok(())
     }
 
     #[test]
     fn all_open_file() -> Result<()> {
-        let err = Error::from(ErrorKind::AlreadyExists);
-        for err_ref in vec![None, Some(&err)].into_iter() {
-            for create in vec![false, true] {
+        for create in vec![false, true] {
+            for create_new in vec![false, true] {
                 for read in vec![false, true] {
                     for write in vec![
                         OpenOptionsWriteMode::None,
@@ -414,8 +444,8 @@ mod tests {
                             }
                             check_behaviour(
                                 Test::default()
-                                    .err(err_ref)
                                     .create(create)
+                                    .create_new(create_new)
                                     .read(read)
                                     .write(write)
                                     .truncate(truncate)

@@ -46,6 +46,7 @@ pub mod exports {
 #[derive(Default)]
 pub(crate) struct OpenOptionsImpl {
     create: bool,
+    create_new: bool,
     truncate: bool,
     read: bool,
     write: OpenOptionsWriteMode,
@@ -93,6 +94,10 @@ impl OpenOptionsImpl {
 
     pub fn create(&mut self, create: bool) {
         self.create = create;
+    }
+
+    pub fn create_new(&mut self, create_new: bool) {
+        self.create_new = create_new;
     }
 
     fn do_create_file(
@@ -228,7 +233,9 @@ impl OpenOptionsImpl {
     }
 
     fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
-        if self.truncate {
+        if self.create_new {
+            return Ok(FileDisposition(FILE_CREATE));
+        } else if self.truncate {
             return Ok(FileDisposition(FILE_OVERWRITE_IF));
         } else if self.create {
             return Ok(FileDisposition(FILE_OPEN_IF));
