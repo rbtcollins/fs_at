@@ -128,7 +128,7 @@ impl OpenOptionsImpl {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // IFF exclusive wasn't requested (currently the default), then
                 // proceed to open-as-dir and return existing dir.
-                if self.create {
+                if self.create && !self.create_new {
                     Ok(())
                 } else {
                     Err(e)
