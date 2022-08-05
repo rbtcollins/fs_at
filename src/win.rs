@@ -1,7 +1,8 @@
 mod sugar;
 
 use std::{
-    ffi, fmt,
+    ffi::c_void,
+    fmt,
     fs::File,
     io::Result,
     mem::{size_of, zeroed, MaybeUninit},
@@ -12,25 +13,27 @@ use std::{
 
 use ntapi::ntioapi::{
     FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS,
-    FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+    FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_OVERWRITTEN,
+    FILE_SUPERSEDED, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use winapi::{
     ctypes,
     shared::{
         minwindef::ULONG,
         ntdef::{NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
+        winerror::ERROR_INVALID_PARAMETER,
     },
     um::winnt::{
         DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, GENERIC_READ,
         GENERIC_WRITE, PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE,
-        SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE,
+        SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
     },
 };
 
 use sugar::{NTStatusError, OSUnicodeString};
 
-use crate::OpenOptions;
+use crate::{OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -43,6 +46,10 @@ pub mod exports {
 #[derive(Default)]
 pub(crate) struct OpenOptionsImpl {
     create: bool,
+    create_new: bool,
+    truncate: bool,
+    read: bool,
+    write: OpenOptionsWriteMode,
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
@@ -73,8 +80,24 @@ struct FileDisposition(u32);
 struct CreateOptions(u32);
 
 impl OpenOptionsImpl {
+    pub fn read(&mut self, read: bool) {
+        self.read = read;
+    }
+
+    pub fn write(&mut self, write: OpenOptionsWriteMode) {
+        self.write = write;
+    }
+
+    pub fn truncate(&mut self, truncate: bool) {
+        self.truncate = truncate;
+    }
+
     pub fn create(&mut self, create: bool) {
         self.create = create;
+    }
+
+    pub fn create_new(&mut self, create_new: bool) {
+        self.create_new = create_new;
     }
 
     fn do_create_file(
@@ -167,13 +190,12 @@ impl OpenOptionsImpl {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match information {
-            FILE_CREATED | FILE_OPENED => {
+            FILE_CREATED | FILE_OPENED | FILE_OVERWRITTEN => {
                 // success, we have an FD
-                Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut ffi::c_void) })
-                // Ok(unsafe { File::from_raw_handle(handle) })
+                Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut c_void) })
             }
 
-            FILE_OVERWRITTEN | FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
+            FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
                 unimplemented!("expected FILE_CREATED|FILE_OPENED|FILE_OVERWRITTEN|FILE_SUPERSEDED|FILE_EXISTS|FILE_DOES_NOT_EXIST, got {}", status_block.Information);
             }
 
@@ -187,7 +209,7 @@ impl OpenOptionsImpl {
         // get_access_mode must not be used for opening a directory
         // ... see docs or we must have file use the Ext trait always.
         let desired_access = DesiredAccess(DELETE | FILE_LIST_DIRECTORY | FILE_TRAVERSE);
-        let mut create_disposition = self.get_file_disposition();
+        let mut create_disposition = self.get_file_disposition(true)?;
         if create_disposition.0 & (FILE_CREATE | FILE_OPEN_IF) == 0 {
             // per docs: create/open/openif required to open a dir, and this
             // function - mkdir - only creates. Permit users to opt into
@@ -200,41 +222,58 @@ impl OpenOptionsImpl {
 
     pub fn open_at(&self, f: &mut File, path: &Path) -> Result<File> {
         let desired_access = self.get_access_mode()?;
-        let create_disposition = self.get_file_disposition();
+        let create_disposition = self.get_file_disposition(false)?;
         // create options needs to be controlled through OpenOptions too.
-        let create_options = CreateOptions(FILE_NON_DIRECTORY_FILE);
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        let create_options = CreateOptions(FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
 
         self.do_create_file(f, path, desired_access, create_disposition, create_options)
     }
 
-    fn get_file_disposition(&self) -> FileDisposition {
-        let mut create_disposition = FileDisposition(0);
-        if self.create {
-            create_disposition.0 |= FILE_OPEN_IF;
+    fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
+        if self.create_new {
+            Ok(FileDisposition(FILE_CREATE))
+        } else if self.truncate {
+            Ok(FileDisposition(FILE_OVERWRITE_IF))
+        } else if self.create {
+            Ok(FileDisposition(FILE_OPEN_IF))
+        } else if call_defaults_create {
+            // mkdir should still work without create / truncate called -
+            // its poor ergonomics otherwise.
+            Ok(FileDisposition(FILE_CREATE))
+        } else {
+            Err(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_PARAMETER as i32,
+            ))
         }
-        // let file_disposition = FileDisposition(FILE_CREATE);
-        create_disposition
     }
 
-    // Very similar to rust itself. The only obvious way to do it.
-    // But not identical, because write sense being honoured makes sense to me.
     fn get_access_mode(&self) -> Result<DesiredAccess> {
-        const ERROR_INVALID_PARAMETER: i32 = 87;
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        let mut desired_access = SYNCHRONIZE;
+        if self.read {
+            desired_access |= GENERIC_READ;
+        }
 
-        // match (self.read, self.write, self.append, self.access_mode) {
-        Ok(DesiredAccess(match (true, false, false, None) {
+        // rust has match (self.read, self.write, self.append, self.access_mode) {
+        desired_access |= match (self.write, None) {
             (.., Some(mode)) => mode,
-            (true, false, false, None) => GENERIC_READ,
-            (false, true, false, None) => GENERIC_WRITE,
-            (true, true, false, None) => GENERIC_READ | GENERIC_WRITE,
-            (false, true, true, None) => FILE_GENERIC_WRITE,
-            (false, _, true, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
-            (true, true, true, None) => GENERIC_READ | FILE_GENERIC_WRITE,
-            (true, _, true, None) => GENERIC_READ | (FILE_GENERIC_WRITE & !FILE_WRITE_DATA),
-            (false, false, false, None) => {
-                return Err(std::io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER))
-            }
-        }))
+            (OpenOptionsWriteMode::Write, None) => GENERIC_WRITE,
+            (OpenOptionsWriteMode::Append, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
+            _ => 0,
+        };
+
+        if desired_access == SYNCHRONIZE {
+            // neither read nor write modes selected
+            return Err(std::io::Error::from_raw_os_error(
+                ERROR_INVALID_PARAMETER as i32,
+            ));
+        }
+        Ok(DesiredAccess(desired_access))
     }
 
     fn with_security_qos<F>(&mut self, mutator: F)
@@ -278,6 +317,7 @@ pub trait OpenOptionsExt {
 
     let mut options = OpenOptions::default();
     options.allocation_size(12345);
+    options.read(true);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
     */
@@ -306,6 +346,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.file_attributes(winapi::um::winnt::FILE_ATTRIBUTE_TEMPORARY);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -332,6 +373,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.object_attributes(winapi::shared::ntdef::OBJ_CASE_INSENSITIVE);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -372,6 +414,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_impersonation(winapi::um::winnt::SecurityIdentification);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -399,6 +442,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_context_tracking(winapi::um::winnt::SECURITY_DYNAMIC_TRACKING);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
@@ -426,6 +470,7 @@ pub trait OpenOptionsExt {
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
+    options.read(true);
     options.security_qos_effective_only(true);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
