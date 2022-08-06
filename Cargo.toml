@@ -14,12 +14,12 @@ version = "0.0.1"
 
 [dependencies]
 cfg-if = "1.0.0"
+cvt = "0.1.1"
 
 [dev-dependencies]
 tempfile = "3.3.0"
 
 [target.'cfg(not(windows))'.dependencies]
-cvt = "0.1.1"
 libc = "0.2.121"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more) : consider it weak and something we can remove if expedient

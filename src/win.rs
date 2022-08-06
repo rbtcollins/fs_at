@@ -1,33 +1,40 @@
 mod sugar;
 
 use std::{
-    ffi::c_void,
+    ffi::{c_void, OsStr, OsString},
     fmt,
     fs::File,
     io::Result,
     mem::{size_of, zeroed, MaybeUninit},
-    os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt},
+    os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
     path::Path,
     ptr::null_mut,
+    slice,
 };
 
 use ntapi::ntioapi::{
-    FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS,
-    FILE_NON_DIRECTORY_FILE, FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_OVERWRITTEN,
-    FILE_SUPERSEDED, FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPEN,
+    FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+    FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use winapi::{
     ctypes,
     shared::{
-        minwindef::ULONG,
-        ntdef::{NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
-        winerror::ERROR_INVALID_PARAMETER,
+        minwindef::{LPVOID, ULONG},
+        ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
+        winerror::{ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
     },
-    um::winnt::{
-        DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, GENERIC_READ,
-        GENERIC_WRITE, PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE,
-        SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
+    um::{
+        fileapi::FILE_ID_BOTH_DIR_INFO,
+        minwinbase::{FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo},
+        winbase::GetFileInformationByHandleEx,
+        winnt::{
+            DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA,
+            GENERIC_READ, GENERIC_WRITE, PSECURITY_QUALITY_OF_SERVICE,
+            SECURITY_CONTEXT_TRACKING_MODE, SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE,
+            SYNCHRONIZE,
+        },
     },
 };
 
@@ -226,8 +233,10 @@ impl OpenOptionsImpl {
         // create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
-        // requires SYNCHRONIZE on the access mode.
-        let create_options = CreateOptions(FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+        // requires SYNCHRONIZE on the access mode. We should permit users to
+        // expect particular types, but until we make that explicit, we need to
+        // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
+        let create_options = CreateOptions(FILE_SYNCHRONOUS_IO_NONALERT);
 
         self.do_create_file(f, path, desired_access, create_disposition, create_options)
     }
@@ -244,9 +253,11 @@ impl OpenOptionsImpl {
             // its poor ergonomics otherwise.
             Ok(FileDisposition(FILE_CREATE))
         } else {
-            Err(std::io::Error::from_raw_os_error(
-                ERROR_INVALID_PARAMETER as i32,
-            ))
+            // just open the existing file.
+            Ok(FileDisposition(FILE_OPEN))
+            // Err(std::io::Error::from_raw_os_error(
+            //     ERROR_INVALID_PARAMETER as i32,
+            // ))
         }
     }
 
@@ -516,6 +527,116 @@ impl OpenOptionsExt for OpenOptions {
         self._impl
             .with_security_qos(|mut qos| qos.EffectiveOnly = native_value);
         self
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadDirImpl<'a> {
+    /// FILE_ID_BOTH_DIR_INFO is a variable-length struct, otherwise this would
+    /// be a vec of that. None indicates end of iterator from the OS.
+    buffer: Option<Vec<u8>>,
+    d: &'a mut File,
+    // byte offset in buffer to next entry to yield
+    offset: usize,
+}
+
+impl<'a> ReadDirImpl<'a> {
+    pub fn new(d: &mut File) -> Result<ReadDirImpl> {
+        let mut result = ReadDirImpl {
+            // Start with a page, can always grow it statically or dynamically if
+            // needed.
+            buffer: Some(vec![0_u8; 4096]),
+            d,
+            offset: 0,
+        };
+        // TODO: can this ever fail as FindFirstFile does?
+        result.fill_buffer(FileIdBothDirectoryRestartInfo)?;
+        Ok(result)
+    }
+
+    fn fill_buffer(&mut self, class: ULONG) -> Result<bool> {
+        let buffer = self.buffer.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Attempt to fill buffer after end of dir",
+            )
+        })?;
+        // Implement
+        // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findnextfilea
+        // without ever doing path resolution... the docs for
+        // GetFileInformationByHandleEx do not mention how to detect end of dir,
+        // but FindNextFile does:
+        //
+        // ```
+        //If the function fails because no more matching files can be found,
+        //the GetLastError function returns ERROR_NO_MORE_FILES.
+        // ```
+        let result = cvt::cvt(unsafe {
+            GetFileInformationByHandleEx(
+                self.d.as_raw_handle() as HANDLE,
+                class,
+                buffer.as_mut_ptr() as LPVOID,
+                buffer.len() as u32,
+            )
+        });
+        match result {
+            Ok(_) => Ok(false),
+            Err(e) if e.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Iterator for ReadDirImpl<'_> {
+    type Item = Result<DirEntryImpl>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // if the buffer is empty, fill it; if the buffer is None, exit early.
+        if self.offset >= self.buffer.as_ref()?.len() {
+            match self.fill_buffer(FileIdBothDirectoryInfo) {
+                Ok(false) => {
+                    self.offset = 0;
+                }
+                Ok(true) => {
+                    self.buffer = None;
+                    return None;
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        // offset is now valid. Dereference into a struct.
+        let struct_mem = &self.buffer.as_ref()?[self.offset..];
+        let info = unsafe { &*struct_mem.as_ptr().cast::<FILE_ID_BOTH_DIR_INFO>() };
+        self.offset = if info.NextEntryOffset == 0 {
+            self.buffer.as_ref()?.len()
+        } else {
+            info.NextEntryOffset as usize + self.offset
+        };
+
+        let name = OsString::from_wide(unsafe {
+            slice::from_raw_parts(
+                info.FileName.as_ptr(),
+                info.FileNameLength as usize / size_of::<u16>(),
+            )
+        });
+        Some(Ok(DirEntryImpl { name }))
+        //
+        //
+        // Read Attributes, Delete, Synchronize
+        // Disposition:	Open
+        // Options:	Synchronous IO Non-Alert, Open Reparse Point
+        //
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DirEntryImpl {
+    name: OsString,
+}
+
+impl DirEntryImpl {
+    pub fn name(&self) -> &OsStr {
+        &self.name
     }
 }
 

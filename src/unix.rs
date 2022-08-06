@@ -274,7 +274,7 @@ impl Iterator for ReadDirImpl<'_> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct DirEntryImpl {
     name: OsString,
 }
