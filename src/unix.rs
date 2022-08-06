@@ -1,9 +1,11 @@
 use std::{
-    ffi::CString,
+    ffi::{CString, OsStr, OsString},
     fs::File,
     io::Result,
+    marker::PhantomData,
     os::unix::prelude::{AsRawFd, FromRawFd, OsStrExt},
     path::Path,
+    ptr,
 };
 
 // This will probably take a few iterations to get right. The idea: always use
@@ -177,6 +179,109 @@ impl OpenOptionsExt for OpenOptions {
     fn mode(&mut self, mode: mode_t) -> &mut Self {
         self._impl.mode = Some(mode);
         self
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadDirImpl<'a> {
+    // Since we clone the FD, the original FD is now separate. In theory.
+    // However for Windows we use the File directly, thus here we need to
+    // pretend.
+    _phantom: PhantomData<&'a File>,
+    // Set to None after we closedir it. Perhaps we should we impl Send and Sync
+    // because the data referenced is owned by libc ?
+    dir: Option<ptr::NonNull<libc::DIR>>,
+}
+
+impl<'a> ReadDirImpl<'a> {
+    pub fn new(dir_file: &'a mut File) -> Result<Self> {
+        // closedir closes the FD; make a new one that we can close when done with.
+        let new_fd =
+            cvt_r(|| unsafe { libc::fcntl(dir_file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) })?;
+        let mut dir = Some(
+            ptr::NonNull::new(unsafe { libc::fdopendir(new_fd) }).ok_or_else(|| {
+                let _droppable = unsafe { File::from_raw_fd(new_fd) };
+                std::io::Error::last_os_error()
+            })?,
+        );
+
+        // If dir_file has had operations on it - such as open_at - its pointer
+        // might not be at the start of the dir, and fdopendir is documented
+        // (e.g. BSD man pages) to not rewind the fd - and our cloned fd
+        // inherits the pointer.
+        if let Some(d) = dir.as_mut() {
+            unsafe { libc::rewinddir(d.as_mut()) };
+        }
+
+        Ok(ReadDirImpl {
+            _phantom: PhantomData,
+            dir,
+        })
+    }
+
+    fn close_dir(&mut self) -> Result<()> {
+        if let Some(ref mut dir) = self.dir {
+            let result = unsafe { libc::closedir(dir.as_mut()) };
+            // call made, clear state
+            self.dir = None;
+            cvt_r(|| result)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ReadDirImpl<'_> {
+    fn drop(&mut self) {
+        // like the stdlib, we eat errors occuring during drop, as there is no
+        // way to get error handling.
+        let _ = self.close_dir();
+    }
+}
+
+impl Iterator for ReadDirImpl<'_> {
+    type Item = Result<DirEntryImpl>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let dir = unsafe { self.dir?.as_mut() };
+        // the readdir result is only guaranteed valid within the same thread
+        // and until other calls are made on the same dir stream. Thus we
+        // perform the required work inside next, allowing the next call to
+        // readdir to be managed by the single mutable borrower rule in Rust.
+        // readdir requires errno set to zero.
+        nix::Error::clear();
+        ptr::NonNull::new(unsafe { libc::readdir(dir) })
+            .map(|e| {
+                Ok(DirEntryImpl {
+                    name: unsafe {
+                        // Step one: C pointer to CStr - referenced data, length not known.
+                        let c_str = std::ffi::CStr::from_ptr(e.as_ref().d_name.as_ptr());
+                        // Step two: OsStr: referenced data, length calcu;ated
+                        let os_str = OsStr::from_bytes(c_str.to_bytes());
+                        // Step three: owned copy
+                        os_str.to_os_string()
+                    },
+                })
+            })
+            .or_else(|| {
+                // NULL result, an error IFF errno has been set.
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(0) {
+                    None
+                } else {
+                    Some(Err(err))
+                }
+            })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct DirEntryImpl {
+    name: OsString,
+}
+
+impl DirEntryImpl {
+    pub fn name(&self) -> &OsStr {
+        &self.name
     }
 }
 

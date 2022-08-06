@@ -21,6 +21,11 @@ tempfile = "3.3.0"
 [target.'cfg(not(windows))'.dependencies]
 cvt = "0.1.1"
 libc = "0.2.121"
+# Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
+# MAX_PATH and more) : consider it weak and something we can remove if expedient
+# later.
+nix = { version = "0.24.2", default-features = false, features = ["dir"] }
+
 
 [target.'cfg(windows)'.dependencies]
 ntapi = "0.3.7"
