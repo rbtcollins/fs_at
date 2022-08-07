@@ -6,7 +6,7 @@ filesystem code, since otherwise the state of the filesystem path that
 operations are executed against can change silently, leading to TOC-TOU race
 conditions. For Unix these calls are readily available in the libc crate, but
 for Windows some more plumbing is needed. This crate provides a unified
-Rust-y interface to these calls.
+Rust-y and safe interface to these calls.
 
 ## MSRV policy
 
