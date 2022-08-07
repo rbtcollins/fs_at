@@ -148,6 +148,13 @@ impl OpenOptionsImpl {
         let fd = cvt_r(|| unsafe { openat64(d.as_raw_fd(), path.as_ptr(), flags, mode as c_int) })?;
         Ok(unsafe { File::from_raw_fd(fd) })
     }
+
+    pub fn symlink_at(&self, d: &mut File, linkname: &Path, target: &Path) -> Result<()> {
+        let linkname = linkname.as_cstring()?;
+        let target = target.as_cstring()?;
+        cvt_r(|| unsafe { libc::symlinkat(target.as_ptr(), d.as_raw_fd(), linkname.as_ptr()) })
+            .map(|_| ())
+    }
 }
 
 pub trait OpenOptionsExt {

@@ -176,7 +176,7 @@ impl OpenOptions {
     /// 0o777.
     pub fn mkdir_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
         self._impl
-            .mkdir_at(d, OpenOptions::ensure_root(p.as_ref())?)
+            .mkdir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
 
     /// Opens a file at the path p relative to the directory d.
@@ -190,10 +190,29 @@ impl OpenOptions {
     /// be a platform native one. e.g. `foo\\bar` on Windows, vs `foo/bar` on
     /// most other OS's.
     pub fn open_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
-        self._impl.open_at(d, OpenOptions::ensure_root(p.as_ref())?)
+        self._impl
+            .open_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
 
-    fn ensure_root(p: &Path) -> Result<&Path> {
+    /// Creates a symlink at the path linkname pointing to target.
+    ///
+    /// This will fail if the path linkname is already used.
+    ///
+    /// Unlike [`open_at`] this doesn't return a File object: opening symlink files
+    /// directly is not portable.
+    pub fn symlink_at<P, Q>(&self, d: &mut File, linkname: P, target: Q) -> Result<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        self._impl.symlink_at(
+            d,
+            OpenOptions::ensure_rootless(linkname.as_ref())?,
+            target.as_ref(),
+        )
+    }
+
+    fn ensure_rootless(p: &Path) -> Result<&Path> {
         if p.has_root() {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -571,6 +590,19 @@ mod tests {
             assert_eq!(3, children.len(), "{:?}", children);
             assert!(dir_present(&children, OsStr::new("3")), "{:?}", children);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_at() -> Result<()> {
+        let (_tmp, mut parent_dir, _pathname) = setup()?;
+        OpenOptions::default().symlink_at(&mut parent_dir, "linkname", "target")?;
+        let children = read_dir(&mut parent_dir)?.collect::<Result<Vec<DirEntry>>>()?;
+        assert_eq!(
+            3, // . and .. and the link
+            children.len()
+        );
+        assert!(children.iter().any(|e| e.name() == "linkname"));
         Ok(())
     }
 }
