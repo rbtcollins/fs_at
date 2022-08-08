@@ -21,7 +21,7 @@ cfg_if::cfg_if! {
 use cvt::cvt_r;
 use libc::{c_int, mkdirat, mode_t};
 
-use crate::{OpenOptions, OpenOptionsWriteMode};
+use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -149,7 +149,13 @@ impl OpenOptionsImpl {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    pub fn symlink_at(&self, d: &mut File, linkname: &Path, target: &Path) -> Result<()> {
+    pub fn symlink_at(
+        &self,
+        d: &mut File,
+        linkname: &Path,
+        _entry_type: LinkEntryType,
+        target: &Path,
+    ) -> Result<()> {
         let linkname = linkname.as_cstring()?;
         let target = target.as_cstring()?;
         cvt_r(|| unsafe { libc::symlinkat(target.as_ptr(), d.as_raw_fd(), linkname.as_ptr()) })
