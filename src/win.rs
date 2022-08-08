@@ -279,8 +279,8 @@ impl OpenOptionsImpl {
         let absolute = target.is_absolute();
         // target might not start with \??\.
         if absolute
-            && &os_target.encode_wide().take(4).collect::<Vec<_>>()
-                != &[0x005C, 0x003F, 0x003F, 0x005C]
+            && os_target.encode_wide().take(4).collect::<Vec<_>>()
+                != [0x005C, 0x003F, 0x003F, 0x005C]
         {
             // prefix target with \??\
             final_target.push(r"\??\");
@@ -351,10 +351,10 @@ impl OpenOptionsImpl {
         };
 
         reparse_data_vec[path_offset..path_offset + subst_path.len() * 2]
-            .copy_from_slice(&subst_path_u8[..]);
+            .copy_from_slice(subst_path_u8);
         reparse_data_vec[path_offset + subst_path.len() * 2
             ..path_offset + subst_path.len() * 2 + print_path.len() * 2]
-            .copy_from_slice(&print_path_u8[..]);
+            .copy_from_slice(print_path_u8);
 
         let bool_result = unsafe {
             DeviceIoControl(
