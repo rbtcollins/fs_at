@@ -30,7 +30,9 @@ jobs:
       fail-fast: false
       matrix:
         arch: [i686, x86_64, aarch64]
-        variant: [gnu, msvc]
+        # "gnu" on windows isn't particularly interesting/different but very slow in
+        # CI. Skip unless/until we have a bug report where it matters.
+        variant: [msvc]
         channel: ["1.62.1", stable, nightly]
         exclude:
           - arch: aarch64
