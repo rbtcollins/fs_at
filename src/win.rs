@@ -358,7 +358,7 @@ impl OpenOptionsImpl {
 
         let bool_result = unsafe {
             DeviceIoControl(
-                link_file.as_raw_handle(),
+                link_file.as_raw_handle() as HANDLE,
                 FSCTL_SET_REPARSE_POINT,
                 reparse_data_vec.as_ptr() as LPVOID,
                 reparse_data_vec.len() as u32,
