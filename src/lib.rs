@@ -198,9 +198,36 @@ impl OpenOptions {
     ///
     /// This will fail if the path linkname is already used.
     ///
-    /// Unlike [`open_at`] this doesn't return a File object: opening symlink files
-    /// directly is not portable.
-    pub fn symlink_at<P, Q>(&self, d: &mut File, linkname: P, target: Q) -> Result<()>
+    /// Unlike [`open_at`] this doesn't return a File object: opening symlink
+    /// files directly is not portable.
+    ///
+    /// Note: on Windows two syscalls are required to create a symlink. The
+    /// creation of the backing file is atomic and safe, but it is possible if
+    /// the process is interrupted that it will remain as a an blank
+    /// [`LinkEntryType`] rather than being converted to a symlink.
+    /// https://github.com/rbtcollins/fs_at/issues/10
+    ///
+    /// The target may be an absolute or relative path, and will be inspected to
+    /// determine that before creation - but as with [`open_at`] native OS path
+    /// separators must be used, and minimal processing is done - to use
+    /// absolute paths, canonicalise them first.
+    ///
+    /// The `entry_type` is unused on *nix OS's; if writing *nix only software,
+    /// just pass in LinkEntryType::default(). Similarly if writing portable
+    /// software where the only consumers will be symlink aware. But if humans
+    /// using a UI are expected to interact with the link, choose an appropriate
+    /// type based on how the UI should behave when viewing the parent.
+    ///
+    /// Stability: it isn't clear whether entry_type should be exposed, or the
+    /// default should be just a file(or dir) always and then fine grained
+    /// control via an extension trait.
+    pub fn symlink_at<P, Q>(
+        &self,
+        d: &mut File,
+        linkname: P,
+        entry_type: LinkEntryType,
+        target: Q,
+    ) -> Result<()>
     where
         P: AsRef<Path>,
         Q: AsRef<Path>,
@@ -208,6 +235,7 @@ impl OpenOptions {
         self._impl.symlink_at(
             d,
             OpenOptions::ensure_rootless(linkname.as_ref())?,
+            entry_type,
             target.as_ref(),
         )
     }
@@ -281,6 +309,19 @@ impl DirEntry {
 /// See [`ReadDir`] and [`DirEntry`] for details.
 pub fn read_dir(d: &mut File) -> Result<ReadDir> {
     ReadDir::new(d)
+}
+
+/// File kind indicator
+///
+/// On Windows symlinks are implemented an actual directory or file, with
+/// reparse data stored in a single global index; the kind of the actual
+/// directory or file leaks through to the operations one can perform on the
+/// symlink (e.g. cannot chdir from a CMD prompt to a file-backed symlink).
+#[derive(Default, Debug)]
+pub enum LinkEntryType {
+    #[default]
+    File,
+    Dir,
 }
 
 pub mod os {
@@ -596,13 +637,26 @@ mod tests {
     #[test]
     fn symlink_at() -> Result<()> {
         let (_tmp, mut parent_dir, _pathname) = setup()?;
-        OpenOptions::default().symlink_at(&mut parent_dir, "linkname", "target")?;
+        OpenOptions::default().symlink_at(
+            &mut parent_dir,
+            "linkname1",
+            crate::LinkEntryType::Dir,
+            "target",
+        )?;
+        OpenOptions::default().symlink_at(
+            &mut parent_dir,
+            "linkname2",
+            crate::LinkEntryType::File,
+            "target",
+        )?;
+
         let children = read_dir(&mut parent_dir)?.collect::<Result<Vec<DirEntry>>>()?;
         assert_eq!(
-            3, // . and .. and the link
+            4, // . and .. and the two links
             children.len()
         );
-        assert!(children.iter().any(|e| e.name() == "linkname"));
+        assert!(children.iter().any(|e| e.name() == "linkname1"));
+        assert!(children.iter().any(|e| e.name() == "linkname2"));
         Ok(())
     }
 }

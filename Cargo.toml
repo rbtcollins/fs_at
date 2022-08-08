@@ -32,6 +32,7 @@ ntapi = "0.3.7"
 winapi = { version = "0.3", features = [
     "ntdef",
     "minwindef",
+    "ioapiset",
     "winerror",
     "libloaderapi",
     "winbase",

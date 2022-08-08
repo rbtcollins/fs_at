@@ -5,7 +5,7 @@ use std::{
     fmt,
     fs::File,
     io::Result,
-    mem::{size_of, zeroed, MaybeUninit},
+    mem::{self, size_of, zeroed, MaybeUninit},
     os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
     path::Path,
     ptr::null_mut,
@@ -13,34 +13,37 @@ use std::{
 };
 
 use ntapi::ntioapi::{
-    FILE_CREATE, FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPEN,
-    FILE_OPENED, FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
-    FILE_SYNCHRONOUS_IO_NONALERT,
+    REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, FILE_CREATE, FILE_CREATED,
+    FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPEN, FILE_OPENED, FILE_OPEN_IF,
+    FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED, FILE_SYNCHRONOUS_IO_NONALERT,
+    REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
 };
 use winapi::{
     ctypes,
     shared::{
-        minwindef::{LPVOID, ULONG},
+        minwindef::{LPDWORD, LPVOID, ULONG},
         ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
         winerror::{ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
     },
     um::{
         fileapi::FILE_ID_BOTH_DIR_INFO,
-        minwinbase::{FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo},
+        ioapiset::DeviceIoControl,
+        minwinbase::{FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, LPOVERLAPPED},
         winbase::GetFileInformationByHandleEx,
+        winioctl::FSCTL_SET_REPARSE_POINT,
         winnt::{
             DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA,
-            GENERIC_READ, GENERIC_WRITE, PSECURITY_QUALITY_OF_SERVICE,
-            SECURITY_CONTEXT_TRACKING_MODE, SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE,
-            SYNCHRONIZE,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+            FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE,
+            IO_REPARSE_TAG_SYMLINK, PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE,
+            SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
         },
     },
 };
 
 use sugar::{NTStatusError, OSUnicodeString};
 
-use crate::{OpenOptions, OpenOptionsWriteMode};
+use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -215,7 +218,8 @@ impl OpenOptionsImpl {
     pub fn mkdir_at(&self, f: &mut File, path: &Path) -> Result<File> {
         // get_access_mode must not be used for opening a directory
         // ... see docs or we must have file use the Ext trait always.
-        let desired_access = DesiredAccess(DELETE | FILE_LIST_DIRECTORY | FILE_TRAVERSE);
+        let desired_access =
+            DesiredAccess(DELETE | FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_WRITE_ATTRIBUTES);
         let mut create_disposition = self.get_file_disposition(true)?;
         if create_disposition.0 & (FILE_CREATE | FILE_OPEN_IF) == 0 {
             // per docs: create/open/openif required to open a dir, and this
@@ -239,6 +243,132 @@ impl OpenOptionsImpl {
         let create_options = CreateOptions(FILE_SYNCHRONOUS_IO_NONALERT);
 
         self.do_create_file(f, path, desired_access, create_disposition, create_options)
+    }
+
+    pub fn symlink_at(
+        &self,
+        d: &mut File,
+        linkname: &Path,
+        link_entry_type: LinkEntryType,
+        target: &Path,
+    ) -> Result<()> {
+        // 1 - create a plain old file/dir  atomically.
+        let link_file = match link_entry_type {
+            LinkEntryType::Dir => OpenOptions::default()
+                .create_new(true)
+                .write(OpenOptionsWriteMode::Write)
+                .mkdir_at(d, linkname),
+            LinkEntryType::File => OpenOptions::default()
+                .create_new(true)
+                .write(OpenOptionsWriteMode::Write)
+                .open_at(d, linkname),
+        }?;
+
+        // 2 - convert it to a symlink
+
+        // Symlinks can be absolute or relative. The discriminator rules are not
+        // clear for this, but it seems like we want the following for a
+        // absolute path
+        // - no dependence on implicit state like 'current working directory on
+        // drive X'.
+
+        //is_absolute is perhaps good enough. Ultimately callers of this need to
+        // provide reasonable working data.
+        let os_target = target.as_os_str().to_owned();
+        let mut final_target = OsString::new();
+        let absolute = target.is_absolute();
+        // target might not start with \??\.
+        if absolute
+            && &os_target.encode_wide().take(4).collect::<Vec<_>>()
+                != &[0x005C, 0x003F, 0x003F, 0x005C]
+        {
+            // prefix target with \??\
+            final_target.push(r"\??\");
+        }
+        final_target.push(&os_target);
+
+        // Symlink needs two strings: print (e.g. d:\foo) and substitute (e.g.
+        // \??\d:\foo) for print string we take the supplied path. For
+        // substitute, final_target.
+
+        // TODO: make this more like zero-copy.
+        let print_path = os_target.encode_wide().collect::<Vec<_>>();
+        let subst_path = final_target.encode_wide().collect::<Vec<_>>();
+        let path_length = print_path.len() + subst_path.len();
+
+        // Size of the union, -1 for the 1 byte in-struct array, + path lengths.
+        let reparse_data_length =
+            mem::size_of::<REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer>() - 1 + path_length * 2;
+        // ULONG + USHORT*2
+        let reparse_length = reparse_data_length + 8;
+        let mut reparse_data_vec: Vec<u8> = vec![0; reparse_length];
+
+        // todo alignment safety: calculate the size in multiples of
+        // REPARSE_DATA_BUFFER.len and then cast down.
+        let (head, aligned, _tail) =
+            unsafe { reparse_data_vec.align_to_mut::<REPARSE_DATA_BUFFER>() };
+        if !head.is_empty() {
+            // TODO: use body instead later on?
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "non-aligned struct allocation",
+            ));
+        }
+        let mut reparse_data = &mut aligned[0];
+
+        reparse_data.ReparseTag = IO_REPARSE_TAG_SYMLINK;
+
+        let to_u16 = |l| {
+            TryFrom::try_from(l).map_err(|_e| {
+                std::io::Error::new(std::io::ErrorKind::Other, "path length too long")
+            })
+        };
+
+        reparse_data.ReparseDataLength = to_u16(reparse_data_length)?;
+        if !absolute {
+            reparse_data.u.SymbolicLinkReparseBuffer.Flags = SYMLINK_FLAG_RELATIVE;
+        }
+        reparse_data
+            .u
+            .SymbolicLinkReparseBuffer
+            .SubstituteNameLength = to_u16(subst_path.len() * 2)?;
+        reparse_data
+            .u
+            .SymbolicLinkReparseBuffer
+            .SubstituteNameOffset = 0;
+        reparse_data.u.SymbolicLinkReparseBuffer.PrintNameLength = to_u16(print_path.len() * 2)?;
+        reparse_data.u.SymbolicLinkReparseBuffer.PrintNameOffset = to_u16(subst_path.len() * 2)?;
+        let path_addr =
+            unsafe { reparse_data.u.SymbolicLinkReparseBuffer.PathBuffer.as_ptr() as *const u8 };
+        let path_offset = unsafe { path_addr.offset_from(aligned.as_ptr() as *const u8) } as usize;
+        // copy the strings in:
+
+        let print_path_u8 = unsafe {
+            std::slice::from_raw_parts(print_path.as_ptr().cast::<u8>(), print_path.len() * 2)
+        };
+        let subst_path_u8 = unsafe {
+            std::slice::from_raw_parts(subst_path.as_ptr().cast::<u8>(), subst_path.len() * 2)
+        };
+
+        reparse_data_vec[path_offset..path_offset + subst_path.len() * 2]
+            .copy_from_slice(&subst_path_u8[..]);
+        reparse_data_vec[path_offset + subst_path.len() * 2
+            ..path_offset + subst_path.len() * 2 + print_path.len() * 2]
+            .copy_from_slice(&print_path_u8[..]);
+
+        let bool_result = unsafe {
+            DeviceIoControl(
+                link_file.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                reparse_data_vec.as_ptr() as LPVOID,
+                reparse_data_vec.len() as u32,
+                NULL,
+                0,
+                NULL as LPDWORD,
+                NULL as LPOVERLAPPED,
+            )
+        };
+        cvt::cvt(bool_result).map(|_v| ())
     }
 
     fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
