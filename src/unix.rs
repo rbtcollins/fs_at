@@ -47,6 +47,7 @@ pub(crate) struct OpenOptionsImpl {
     truncate: bool,
     create: bool,
     create_new: bool,
+    follow: Option<bool>,
     mode: Option<mode_t>,
 }
 
@@ -71,6 +72,10 @@ impl OpenOptionsImpl {
         self.create_new = create_new;
     }
 
+    pub fn follow(&mut self, follow: bool) {
+        self.follow = Some(follow)
+    }
+
     fn get_flags(&self) -> Result<c_int> {
         let data_flags = match (self.read, self.write) {
             (false, OpenOptionsWriteMode::Write) => Ok(libc::O_WRONLY),
@@ -93,12 +98,17 @@ impl OpenOptionsImpl {
             0
         };
 
+        let no_follow_flag = match self.follow {
+            None | Some(true) => 0,
+            Some(false) => libc::O_NOFOLLOW,
+        };
+
         // Some / all of these need to become OpenOptions controls.
         let common_flags = libc::O_CLOEXEC | libc::O_NOCTTY;
         // We should add an extension to suppport libc::O_PATH as NtCreateFile
         // has a matching capability.
         // Similarly O_TMPFILE
-        Ok(data_flags | create_flags | common_flags)
+        Ok(data_flags | create_flags | common_flags | no_follow_flag)
     }
 
     pub fn open_at(&self, d: &mut File, path: &Path) -> Result<File> {
@@ -125,12 +135,16 @@ impl OpenOptionsImpl {
     pub fn mkdir_at(&self, d: &mut File, path: &Path) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
+        let mut mkdir_e = None;
         // create
         match cvt_r(|| unsafe { mkdirat(d.as_raw_fd(), path.as_ptr(), mode) }) {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 // IFF exclusive wasn't requested (currently the default), then
                 // proceed to open-as-dir and return existing dir.
                 if self.create && !self.create_new {
+                    // save the error as we may be doing mkdir on top of a
+                    // non-dir
+                    mkdir_e = Some(e);
                     Ok(())
                 } else {
                     Err(e)
@@ -145,8 +159,17 @@ impl OpenOptionsImpl {
         let flags = libc::O_CLOEXEC | libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_DIRECTORY;
 
         // and open to return it
-        let fd = cvt_r(|| unsafe { openat64(d.as_raw_fd(), path.as_ptr(), flags, mode as c_int) })?;
-        Ok(unsafe { File::from_raw_fd(fd) })
+        let fd = cvt_r(|| unsafe { openat64(d.as_raw_fd(), path.as_ptr(), flags, mode as c_int) });
+        match fd {
+            Err(fd_e) => {
+                if let (Some(libc::ENOTDIR), Some(mkdir_e)) = (fd_e.raw_os_error(), mkdir_e) {
+                    Err(mkdir_e)
+                } else {
+                    Err(fd_e)
+                }
+            }
+            Ok(fd) => Ok(unsafe { File::from_raw_fd(fd) }),
+        }
     }
 
     pub fn symlink_at(

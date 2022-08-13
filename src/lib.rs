@@ -40,6 +40,7 @@ cfg_if::cfg_if! {
 /// platform specific trait, finishing up with the desired manipulation e.g.
 /// `mkdirat`.
 #[derive(Default, Debug)]
+#[non_exhaustive]
 pub struct OpenOptions {
     _impl: OpenOptionsImpl,
 }
@@ -48,6 +49,7 @@ pub struct OpenOptions {
 /// affect how the file is opened - creating the file or truncating it require
 /// separate options.
 #[derive(Clone, Copy, Default, Debug, Eq, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum OpenOptionsWriteMode {
     /// No writing permitted. Allows opening files where the process lacks write permissions, and attempts to write will fail.
     #[default]
@@ -131,6 +133,11 @@ impl OpenOptions {
     /// Set the option to create a new file when missing, while still opening
     /// existing files. Unlike the Rust stdlib, an options with write set to
     /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.
+    ///
+    /// Platform specific:
+    /// - on Windows, safely opens existing directories or makes new ones.
+    /// - on Linux, consumes EEXIST when making a directory and returns an
+    ///   existing directory at that path if it exists.
     pub fn create(&mut self, create: bool) -> &mut Self {
         self._impl.create(create);
         self
@@ -147,18 +154,34 @@ impl OpenOptions {
     /// Unlike the Rust stdlib, an options with write set to
     /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.
     ///
+    /// Platform specific:
+    /// - on Windows, atomically creates a new directory
+    /// - on Linux, treats EEXIST as an error, but then makes a separate syscall
+    ///   to open the directory
+    ///
     /// ```no_compile
     /// use fs_at::OpenOptions;
     ///
     /// let file = OpenOptions::default().write(OpenOptionsWriteMode::Write)
     ///                              .create_new(true)
     ///                              .open_at(&mut parent, "foo.txt");
-    /// let dir = OpenOptions::default()
-    ///                              .create_new(true)
-    ///                              .mkdir_at(&mut parent, "foo.txt");
+    /// let f = OpenOptions::default()
+    ///                              .open_at(&mut parent, "foo.txt").unwrap_err();
     /// ```
     pub fn create_new(&mut self, create_new: bool) -> &mut Self {
         self._impl.create_new(create_new);
+        self
+    }
+
+    /// Set the option to follow symlinks
+    ///
+    /// This defaults to true, matching the behaviour of syscalls and most
+    /// command line utilities.
+    ///
+    /// Unix: This corresponds to O_NOFOLLOW, which disables symlink resolution
+    /// only for the last element of a path.
+    pub fn follow(&mut self, follow: bool) -> &mut Self {
+        self._impl.follow(follow);
         self
     }
 
@@ -317,11 +340,14 @@ pub fn read_dir(d: &mut File) -> Result<ReadDir> {
 /// reparse data stored in a single global index; the kind of the actual
 /// directory or file leaks through to the operations one can perform on the
 /// symlink (e.g. cannot chdir from a CMD prompt to a file-backed symlink).
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
+#[non_exhaustive]
 pub enum LinkEntryType {
     #[default]
     File,
     Dir,
+
+    Other,
 }
 
 pub mod os {
@@ -348,7 +374,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::{read_dir, testsupport::open_dir, DirEntry, OpenOptions, OpenOptionsWriteMode};
+    use crate::{
+        read_dir, testsupport::open_dir, DirEntry, LinkEntryType, OpenOptions, OpenOptionsWriteMode,
+    };
 
     /// Create a directory parent, open it, then rename it to renamed-parent and
     /// create another directory in its place. returns the file handle and the
@@ -375,6 +403,17 @@ mod tests {
         OpenDir,
     }
 
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+    enum SymlinkMode {
+        // no symlink present
+        #[default]
+        None,
+        // operate on paths that are the target of a symlink e.g. foo/<link>
+        LinkIsTarget,
+        // operate on paths that are found through a symlink e.g. <link>/foo
+        LinkIsParent,
+    }
+
     #[derive(Default, Debug, Clone)]
     struct Test {
         pub create: bool,
@@ -383,6 +422,9 @@ mod tests {
         pub write: OpenOptionsWriteMode,
         pub truncate: bool,
         pub op: Op,
+        pub symlink_mode: SymlinkMode,
+        pub symlink_entry_type: LinkEntryType,
+        pub follow: Option<bool>,
     }
 
     impl Test {
@@ -415,6 +457,21 @@ mod tests {
             self.op = op;
             self
         }
+
+        fn symlink_mode(mut self, symlink_mode: SymlinkMode) -> Self {
+            self.symlink_mode = symlink_mode;
+            self
+        }
+
+        fn symlink_entry_type(mut self, symlink_entry_type: LinkEntryType) -> Self {
+            self.symlink_entry_type = symlink_entry_type;
+            self
+        }
+
+        fn follow(mut self, follow: Option<bool>) -> Self {
+            self.follow = follow;
+            self
+        }
     }
 
     fn _check_behaviour(test: Test, create_in_advance: bool, err: Option<&Error>) -> Result<()> {
@@ -425,22 +482,15 @@ mod tests {
         let (_tmp, mut parent_file, renamed_parent) = setup()?;
         let mut options = OpenOptions::default();
 
-        if create_in_advance {
-            match test.op {
-                Op::MkDir => {
-                    options.mkdir_at(&mut parent_file, "child")?;
-                }
-                Op::OpenDir => (),
-                Op::OpenFile => {
-                    let mut first_file = OpenOptions::default()
-                        .create(true)
-                        .write(OpenOptionsWriteMode::Write)
-                        .open_at(&mut parent_file, "child")?;
-                    assert_eq!(16, first_file.write(b"existing content")?);
-                    first_file.flush()?;
-                }
-            }
-        }
+        let (actual_child, child_name) = if test.symlink_mode == SymlinkMode::None {
+            ("child", PathBuf::from("child"))
+        } else if test.symlink_mode == SymlinkMode::LinkIsTarget {
+            ("link_child", PathBuf::from("child"))
+        } else {
+            /* LinkIsParent */
+            ("link_child", PathBuf::from("link_dir").join("link_child"))
+        };
+
         if test.create {
             options.create(true);
         }
@@ -454,11 +504,50 @@ mod tests {
         if test.truncate {
             options.truncate(true);
         }
+        if let Some(follow) = test.follow {
+            options.follow(follow);
+        }
+
+        if create_in_advance {
+            match test.op {
+                Op::MkDir => {
+                    options.mkdir_at(&mut parent_file, actual_child)?;
+                }
+                Op::OpenDir => (),
+                Op::OpenFile => {
+                    let mut first_file = OpenOptions::default()
+                        .create(true)
+                        .write(OpenOptionsWriteMode::Write)
+                        .open_at(&mut parent_file, actual_child)?;
+                    assert_eq!(16, first_file.write(b"existing content")?);
+                    first_file.flush()?;
+                }
+            }
+        }
+        match test.symlink_mode {
+            SymlinkMode::None => {}
+            SymlinkMode::LinkIsParent => {
+                OpenOptions::default().create(true).symlink_at(
+                    &mut parent_file,
+                    "link_dir",
+                    test.symlink_entry_type,
+                    ".",
+                )?;
+            }
+            SymlinkMode::LinkIsTarget => {
+                OpenOptions::default().create(true).symlink_at(
+                    &mut parent_file,
+                    &child_name,
+                    test.symlink_entry_type,
+                    actual_child,
+                )?;
+            }
+        }
 
         let res = match test.op {
-            Op::MkDir => options.mkdir_at(&mut parent_file, "child"),
+            Op::MkDir => options.mkdir_at(&mut parent_file, &child_name),
             Op::OpenDir => unimplemented!(),
-            Op::OpenFile => options.open_at(&mut parent_file, "child"),
+            Op::OpenFile => options.open_at(&mut parent_file, &child_name),
         };
         let mut child = match (res, err) {
             (Ok(child), None) => child,
@@ -469,7 +558,7 @@ mod tests {
                 return Ok(());
             }
         };
-        let expected = renamed_parent.join("child");
+        let expected = renamed_parent.join(actual_child);
         let metadata = expected.symlink_metadata()?;
         match test.op {
             Op::MkDir => assert!(metadata.is_dir()),
@@ -508,18 +597,31 @@ mod tests {
     // semantics down for when races do occur (e.g. O_EXCL is supplied when
     // requested...)
     fn check_behaviour(test: Test) -> Result<()> {
+        let err = if test.symlink_mode == SymlinkMode::LinkIsTarget
+            && (test.op == Op::MkDir || test.create_new)
+        {
+            // mkdirat is specified as failing with EEXIST if pathname exists -
+            // including a dangling symlink. Force those scenarios to errors.
+            // similarly openat with O_EXCL + O_CREAT == create_new.
+            Some(Error::from(ErrorKind::AlreadyExists))
+        } else if test.symlink_mode == SymlinkMode::LinkIsTarget && test.follow == Some(false) {
+            // follow(false) causes every openat to fail ELOOP when the path as given resolves to a link itself.
+            Some(Error::from_raw_os_error(libc::ELOOP))
+        } else {
+            None
+        };
         if test.create_new {
             // run three tests: one that creates the path, and one that expects
             // an error operating on the existing path, and one that expects an
             // error likewise operating on an existing symlink
-            _check_behaviour(test.clone(), false, None)?;
+            _check_behaviour(test.clone(), false, err.as_ref())?;
             let err = Error::from(ErrorKind::AlreadyExists);
             _check_behaviour(test, true, Some(&err))
         } else if test.create || test.truncate {
             // run two tests: one that creates the path, and once that opens
             // the existing path
-            _check_behaviour(test.clone(), true, None)?;
-            _check_behaviour(test, false, None)
+            _check_behaviour(test.clone(), true, err.as_ref())?;
+            _check_behaviour(test, false, err.as_ref())
         } else {
             // without create/create_new/truncate, openat is only useful on
             // existing files.
@@ -528,7 +630,7 @@ mod tests {
             }
             // run two tests: one that creates the path where it didn't exist
             // and one that precreates the file and expects an error
-            _check_behaviour(test.clone(), false, None)?;
+            _check_behaviour(test.clone(), false, err.as_ref())?;
             let err = Error::from(ErrorKind::AlreadyExists);
             _check_behaviour(test, true, Some(&err))
         }
@@ -536,22 +638,32 @@ mod tests {
 
     #[test]
     fn all_mkdir() -> Result<()> {
-        for create in &[false, true] {
-            for create_new in &[false, true] {
-                for read in &[false, true] {
-                    for write in &[
+        for create in [false, true] {
+            for create_new in [false, true] {
+                for read in [false, true] {
+                    for write in [
                         OpenOptionsWriteMode::None,
                         OpenOptionsWriteMode::Write,
                         OpenOptionsWriteMode::Append,
                     ] {
-                        check_behaviour(
-                            Test::default()
-                                .create(*create)
-                                .create_new(*create_new)
-                                .read(*read)
-                                .write(*write)
-                                .op(Op::MkDir),
-                        )?;
+                        for symlink_mode in [
+                            SymlinkMode::None,
+                            SymlinkMode::LinkIsParent,
+                            SymlinkMode::LinkIsTarget,
+                        ] {
+                            for symlink_entry_type in [LinkEntryType::Dir, LinkEntryType::File] {
+                                check_behaviour(
+                                    Test::default()
+                                        .create(create)
+                                        .create_new(create_new)
+                                        .read(read)
+                                        .write(write)
+                                        .symlink_mode(symlink_mode)
+                                        .symlink_entry_type(symlink_entry_type)
+                                        .op(Op::MkDir),
+                                )?;
+                            }
+                        }
                     }
                 }
             }
@@ -561,29 +673,43 @@ mod tests {
 
     #[test]
     fn all_open_file() -> Result<()> {
-        for create in &[false, true] {
-            for create_new in &[false, true] {
-                for read in &[false, true] {
-                    for write in &[
+        for create in [false, true] {
+            for create_new in [false, true] {
+                for read in [false, true] {
+                    for write in [
                         OpenOptionsWriteMode::None,
                         OpenOptionsWriteMode::Write,
                         OpenOptionsWriteMode::Append,
                     ] {
-                        for truncate in &[false, true] {
+                        for truncate in [false, true] {
                             // Filter for open: without one of read/write/append all
                             // calls will fail
-                            if !read && *write == OpenOptionsWriteMode::None {
+                            if !read && write == OpenOptionsWriteMode::None {
                                 continue;
                             }
-                            check_behaviour(
-                                Test::default()
-                                    .create(*create)
-                                    .create_new(*create_new)
-                                    .read(*read)
-                                    .write(*write)
-                                    .truncate(*truncate)
-                                    .op(Op::OpenFile),
-                            )?;
+                            for symlink_mode in [
+                                SymlinkMode::None,
+                                SymlinkMode::LinkIsParent,
+                                SymlinkMode::LinkIsTarget,
+                            ] {
+                                for symlink_entry_type in [LinkEntryType::Dir, LinkEntryType::File]
+                                {
+                                    for follow in [None, Some(true), Some(false)] {
+                                        check_behaviour(
+                                            Test::default()
+                                                .create(create)
+                                                .create_new(create_new)
+                                                .read(read)
+                                                .write(write)
+                                                .truncate(truncate)
+                                                .symlink_mode(symlink_mode)
+                                                .symlink_entry_type(symlink_entry_type)
+                                                .follow(follow)
+                                                .op(Op::OpenFile),
+                                        )?;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
