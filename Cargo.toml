@@ -20,7 +20,7 @@ cvt = "0.1.1"
 tempfile = "3.3.0"
 
 [target.'cfg(not(windows))'.dependencies]
-libc = "0.2.121"
+libc = "0.2.137"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more) : consider it weak and something we can remove if expedient
 # later.
