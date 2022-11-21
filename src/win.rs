@@ -653,7 +653,7 @@ impl OpenOptionsExt for OpenOptions {
     }
 
     fn security_qos_effective_only(&mut self, effective_only: bool) -> &mut Self {
-        let native_value = if effective_only { 1 } else { 0 };
+        let native_value = u8::from(effective_only);
         self._impl
             .with_security_qos(|mut qos| qos.EffectiveOnly = native_value);
         self
@@ -791,7 +791,7 @@ mod tests {
             let renamed_parent = tmp.path().join("renamed-parent");
             std::fs::create_dir(&parent)?;
             let mut parent_file = open_dir(&parent)?;
-            rename(parent, &renamed_parent)?;
+            rename(parent, renamed_parent)?;
             let mut create_opt = OpenOptions::default();
             create_opt.create(true);
             create_opt.mkdir_at(&mut parent_file, "child")?;
