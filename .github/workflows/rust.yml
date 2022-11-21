@@ -14,7 +14,7 @@ jobs:
         os: [ubuntu, macos]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: rustup default
         run: rustup default ${{ matrix.channel }}
       - name: rustup components
@@ -91,7 +91,7 @@ jobs:
             variant: gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
       - name: install msys2
         run: choco install msys2
         if: matrix.variant == 'gnu'
