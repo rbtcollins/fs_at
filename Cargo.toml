@@ -28,6 +28,7 @@ nix = { version = "0.25.0", default-features = false, features = ["dir"] }
 
 
 [target.'cfg(windows)'.dependencies]
+aligned = "0.4.1"
 ntapi = "0.4.0"
 winapi = { version = "0.3", features = [
     "ntdef",

@@ -5,13 +5,34 @@
 //! accept patches : features are being added as needed, rather than
 //! speculatively.
 //!
-//! The Rust standard library does not (yet) offer at filesystem calls as a core
-//! feature. For instance `mkdirat`. These calls are essential for writing
-//! race-free filesystem code, since otherwise the state of the filesystem path
-//! that operations are executed against can change silently, leading to TOC-TOU
-//! race conditions. For Unix these calls are readily available in the libc
-//! crate, but for Windows some more plumbing is needed. This crate provides a
-//! unified Rust-y interface to these calls.
+//! The Rust standard library does not (yet) offer at-style  filesystem calls as
+//! a core feature. For instance `mkdirat`. These calls are essential for
+//! writing race-free filesystem code, since otherwise the state of the
+//! filesystem path that operations are executed against can change silently,
+//! leading to TOC-TOU race conditions. For Unix these calls are readily
+//! available in the libc crate, but for Windows some more plumbing is needed.
+//! This crate provides a unified Rust-y interface to these calls.
+//!
+//! Not all platforms behave identically in their underlying syscalls, and this
+//! crate doesn't abstract over fundamental differences, but it does attempt to
+//! provide consistent errors for key scenarios. As a concrete example creating
+//! a directory at the path of an existing link with follow disabled errors with
+//! AlreadyExists.
+//!
+//! On Linux this is achieved by reading back the path that was requested, as
+//! atomic mkdir isn't yet available. `mkdirat` is used so the parent directory
+//! is reliable, but the presence of a link pointing to another part of the file
+//! system cannot be precluded.
+//!
+//! On Windows this same scenario will either result in `fs_at` receiving a
+//! `NotADirectory` error from `NtCreateFile`, or the open succeeding but a
+//! race-free detection of the presence of the link is done using
+//! `DeviceIoControl`. Both cases are reported as `AlreadyExists`. The two
+//! codepaths exist because on Windows symlinks can themselves be files or
+//! directories, and the kernel type-checks some operations such as creating a
+//! directory or truncating a file at both the link target and the link source.
+//!
+//! Truncate+nofollow also varies by platform: See OpenOptions::truncate.
 
 use std::{
     ffi::OsStr,
@@ -118,7 +139,18 @@ impl OpenOptions {
     ///
     /// The file must be opened with write access for truncate to work.
     ///
-    /// Behaviour of truncate on directories and symlink files is undefined.
+    /// Behaviour of truncate on directories and symlink files is unspecified.
+    ///
+    /// On Windows a file-symlink from A to B when truncated with no-follow
+    /// `(.write(true).truncate(true).follow(false) )` will convert the target from
+    /// a symlink to an empty file. The Windows behaviour is compatible with the definition of O_TRUNC
+    /// on Unix - this case is unspecified. This cannot be made race-free, however
+    /// it seems like a race will at most destroy a link, not permit elevation of
+    /// privileges, so this can be handled by the caller by doing a readlink first,
+    /// treating a success as an EEXISTS error, and then actually performing the
+    /// no-follow truncation.
+    ///
+    /// On Unix platforms EEXISTS tends to be returned instead.
     ///
     /// ```no_compile
     /// use std::fs::OpenOptions;
@@ -146,18 +178,13 @@ impl OpenOptions {
     /// Set the option to create a new file, rejecting existing entries at the
     /// pathname, whether links or directories.
     ///
-    /// This is performed by the OS as an atomic operation, providing safety
+    /// This is requested from the OS as an atomic operation, to provide safety
     /// against TOCTOU conditions. Whether this will occur as an atomic
     /// operation depends on the OS and filesystem in use. In particular NFS
     /// versions below 3 do not support the needed operations for atomicity.
     ///
     /// Unlike the Rust stdlib, an options with write set to
     /// [`OpenOptionsWriteMode::None`] can still be used to create a new file.
-    ///
-    /// Platform specific:
-    /// - on Windows, atomically creates a new directory
-    /// - on Linux, treats EEXIST as an error, but then makes a separate syscall
-    ///   to open the directory
     ///
     /// ```no_compile
     /// use fs_at::OpenOptions;
@@ -176,10 +203,13 @@ impl OpenOptions {
     /// Set the option to follow symlinks
     ///
     /// This defaults to true, matching the behaviour of syscalls and most
-    /// command line utilities.
+    /// command line utilities - except for mkdir
     ///
     /// Unix: This corresponds to O_NOFOLLOW, which disables symlink resolution
     /// only for the last element of a path.
+    ///
+    /// Windows: This corresponds to controlling FILE_FLAG_OPEN_REPARSE_POINT,
+    /// which behaves similarly.
     pub fn follow(&mut self, follow: bool) -> &mut Self {
         self._impl.follow(follow);
         self
@@ -190,13 +220,14 @@ impl OpenOptions {
     ///
     /// Returns a [`File`] opened on the created directory.
     ///
-    /// On Windows this is done without resolving names a second time, in a
-    /// single syscall.
-    ///
-    /// On Unix, an additional openat syscall is performed to open the created
-    /// directory. This limitation may be lifted in future if the mooted
-    /// mkdirat2 call gets created.. The mode of the new directory defaults to
-    /// 0o777.
+    /// Platform specific:
+    /// - on Windows, atomically creates a new directory (two syscalls: one to
+    ///   create the directory with link following disabled, and one to probe
+    ///   whether the opened directory is itself a link).
+    /// - on Unix, treats EEXIST as an error, but on success requires a separate
+    ///   `openat` syscall to open the created directory. This limitation may be
+    ///   lifted in future if the mooted mkdirat2 call gets created.. The mode
+    ///   of the new directory defaults to 0o777.
     pub fn mkdir_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
         self._impl
             .mkdir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
@@ -340,13 +371,12 @@ pub fn read_dir(d: &mut File) -> Result<ReadDir> {
 /// reparse data stored in a single global index; the kind of the actual
 /// directory or file leaks through to the operations one can perform on the
 /// symlink (e.g. cannot chdir from a CMD prompt to a file-backed symlink).
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum LinkEntryType {
     #[default]
     File,
     Dir,
-
     Other,
 }
 
@@ -377,6 +407,18 @@ mod tests {
     use crate::{
         read_dir, testsupport::open_dir, DirEntry, LinkEntryType, OpenOptions, OpenOptionsWriteMode,
     };
+
+    // Can be inlined when more_io_errors stablises
+    cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+            #[allow(non_snake_case)]
+            fn FileSystemLoopError() -> Error { Error::from_raw_os_error(
+            winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}
+        } else {
+            #[allow(non_snake_case)]
+            fn FileSystemLoopError() -> Error { Error::from_raw_os_error(libc::ELOOP)}
+        }
+    }
 
     /// Create a directory parent, open it, then rename it to renamed-parent and
     /// create another directory in its place. returns the file handle and the
@@ -474,11 +516,17 @@ mod tests {
         }
     }
 
-    fn _check_behaviour(test: Test, create_in_advance: bool, err: Option<&Error>) -> Result<()> {
+    fn _check_behaviour(
+        test: Test,
+        create_in_advance: bool,
+        err: Option<&Error>,
+        counter: &mut u32,
+    ) -> Result<()> {
         eprintln!(
-            "testing op: {:?} create_in_advance: {}, err: {:?}",
+            "testing idx: {counter}, op: {:?} create_in_advance: {}, err: {:?}",
             test, create_in_advance, err
         );
+        *counter += 1;
         let (_tmp, mut parent_file, renamed_parent) = setup()?;
         let mut options = OpenOptions::default();
 
@@ -596,7 +644,33 @@ mod tests {
     // safety: what we are checking for here is that we're passing the right
     // semantics down for when races do occur (e.g. O_EXCL is supplied when
     // requested...)
-    fn check_behaviour(test: Test) -> Result<()> {
+    //
+    // Some combinations are illegal on some platforms and they get filtered
+    // out. For instance file operations through a LinkEntryType::Dir link will
+    // error on windows, and directory operations through a LinkEntryType::File
+    // link will error likewise.
+    fn check_behaviour(test: Test, counter: &mut u32) -> Result<()> {
+        if cfg!(windows)
+            && (matches!(test.op, Op::MkDir | Op::OpenDir)
+                && matches!(test.symlink_entry_type, LinkEntryType::File))
+            || (matches!(test.op, Op::OpenFile)
+                && matches!(test.symlink_entry_type, LinkEntryType::Dir))
+        {
+            // Windows doesn't support dir operations on a file typed link or vice versa.
+            return Ok(());
+        }
+        if cfg!(windows)
+            && test.symlink_mode == SymlinkMode::LinkIsTarget
+            && test.follow == Some(false)
+            && test.symlink_entry_type == LinkEntryType::File
+            && test.op == Op::OpenFile
+            && test.truncate
+        {
+            // Windows truncates the *symlink itself* on a truncate operation on
+            // a LinkEntryType::File truncated with no-follow. Just skip the test entirely.
+            return Ok(());
+        }
+
         let err = if test.symlink_mode == SymlinkMode::LinkIsTarget
             && (test.op == Op::MkDir || test.create_new)
         {
@@ -606,7 +680,7 @@ mod tests {
             Some(Error::from(ErrorKind::AlreadyExists))
         } else if test.symlink_mode == SymlinkMode::LinkIsTarget && test.follow == Some(false) {
             // follow(false) causes every openat to fail ELOOP when the path as given resolves to a link itself.
-            Some(Error::from_raw_os_error(libc::ELOOP))
+            Some(FileSystemLoopError())
         } else {
             None
         };
@@ -614,14 +688,14 @@ mod tests {
             // run three tests: one that creates the path, and one that expects
             // an error operating on the existing path, and one that expects an
             // error likewise operating on an existing symlink
-            _check_behaviour(test.clone(), false, err.as_ref())?;
+            _check_behaviour(test.clone(), false, err.as_ref(), counter)?;
             let err = Error::from(ErrorKind::AlreadyExists);
-            _check_behaviour(test, true, Some(&err))
+            _check_behaviour(test, true, Some(&err), counter)
         } else if test.create || test.truncate {
             // run two tests: one that creates the path, and once that opens
             // the existing path
-            _check_behaviour(test.clone(), true, err.as_ref())?;
-            _check_behaviour(test, false, err.as_ref())
+            _check_behaviour(test.clone(), true, err.as_ref(), counter)?;
+            _check_behaviour(test, false, err.as_ref(), counter)
         } else {
             // without create/create_new/truncate, openat is only useful on
             // existing files.
@@ -630,14 +704,15 @@ mod tests {
             }
             // run two tests: one that creates the path where it didn't exist
             // and one that precreates the file and expects an error
-            _check_behaviour(test.clone(), false, err.as_ref())?;
+            _check_behaviour(test.clone(), false, err.as_ref(), counter)?;
             let err = Error::from(ErrorKind::AlreadyExists);
-            _check_behaviour(test, true, Some(&err))
+            _check_behaviour(test, true, Some(&err), counter)
         }
     }
 
     #[test]
     fn all_mkdir() -> Result<()> {
+        let mut counter = 0;
         for create in [false, true] {
             for create_new in [false, true] {
                 for read in [false, true] {
@@ -661,6 +736,7 @@ mod tests {
                                         .symlink_mode(symlink_mode)
                                         .symlink_entry_type(symlink_entry_type)
                                         .op(Op::MkDir),
+                                    &mut counter,
                                 )?;
                             }
                         }
@@ -673,6 +749,7 @@ mod tests {
 
     #[test]
     fn all_open_file() -> Result<()> {
+        let mut counter = 0;
         for create in [false, true] {
             for create_new in [false, true] {
                 for read in [false, true] {
@@ -706,6 +783,7 @@ mod tests {
                                                 .symlink_entry_type(symlink_entry_type)
                                                 .follow(follow)
                                                 .op(Op::OpenFile),
+                                            &mut counter,
                                         )?;
                                     }
                                 }
@@ -783,6 +861,29 @@ mod tests {
         );
         assert!(children.iter().any(|e| e.name() == "linkname1"));
         assert!(children.iter().any(|e| e.name() == "linkname2"));
+        Ok(())
+    }
+
+    #[test]
+    fn check_eloop_raw_os_value() -> Result<()> {
+        let (_tmp, mut parent_dir, _pathname) = setup()?;
+        OpenOptions::default().symlink_at(
+            &mut parent_dir,
+            "linkname1",
+            crate::LinkEntryType::Dir,
+            "linkname2",
+        )?;
+        OpenOptions::default().symlink_at(
+            &mut parent_dir,
+            "linkname2",
+            crate::LinkEntryType::Dir,
+            "linkname1",
+        )?;
+        let e = OpenOptions::default()
+            .read(true)
+            .open_at(&mut parent_dir, "linkname1")
+            .unwrap_err();
+        assert_eq!(e.raw_os_error(), FileSystemLoopError().raw_os_error());
         Ok(())
     }
 }
