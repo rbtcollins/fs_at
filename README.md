@@ -1,12 +1,33 @@
 # `*_at` syscalls for Rust (*nix and Windows)
 
-The Rust standard library does not (yet) offer at filesystem calls as a core
-feature. For instance `mkdirat`. These calls are essential for writing race-free
-filesystem code, since otherwise the state of the filesystem path that
+The Rust standard library does not (yet) offer at-style filesystem calls as a
+core feature. For instance `mkdirat`. These calls are essential for writing
+race-free filesystem code, since otherwise the state of the filesystem path that
 operations are executed against can change silently, leading to TOC-TOU race
 conditions. For Unix these calls are readily available in the libc crate, but
-for Windows some more plumbing is needed. This crate provides a unified
-Rust-y and safe interface to these calls.
+for Windows some more plumbing is needed. This crate provides a unified Rust-y
+and safe interface to these calls.
+
+Not all platforms behave identically in their underlying syscalls, and this
+crate doesn't abstract over fundamental differences, but it does attempt to
+provide consistent errors for key scenarios. As a concrete example creating
+a directory at the path of an existing link with follow disabled errors with
+AlreadyExists.
+
+On Linux this is achieved by reading back the path that was requested, as
+atomic mkdir isn't yet available. `mkdirat` is used so the parent directory
+is reliable, but the presence of a link pointing to another part of the file
+system cannot be precluded.
+
+On Windows this same scenario will either result in `fs_at` receiving a
+`NotADirectory` error from `NtCreateFile`, or the open succeeding but a
+race-free detection of the presence of the link is done using
+`DeviceIoControl`. Both cases are reported as `AlreadyExists`. The two
+codepaths exist because on Windows symlinks can themselves be files or
+directories, and the kernel type-checks some operations such as creating a
+directory or truncating a file at both the link target and the link source.
+
+Truncate+nofollow also varies by platform: See OpenOptions::truncate.
 
 ## MSRV policy
 

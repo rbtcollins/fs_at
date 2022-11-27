@@ -4,39 +4,44 @@ use std::{
     ffi::{c_void, OsStr, OsString},
     fmt,
     fs::File,
-    io::Result,
+    io::{self, ErrorKind, Result},
     mem::{self, size_of, zeroed, MaybeUninit},
     os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
     path::Path,
-    ptr::null_mut,
+    ptr::{self, null_mut},
     slice,
 };
 
+use aligned::{Aligned, A8};
 use ntapi::ntioapi::{
     REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, FILE_CREATE, FILE_CREATED,
     FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPEN, FILE_OPENED, FILE_OPEN_IF,
-    FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED, FILE_SYNCHRONOUS_IO_NONALERT,
-    REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
+    FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+    FILE_SYNCHRONOUS_IO_NONALERT, REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
 };
 use winapi::{
     ctypes,
     shared::{
         minwindef::{LPDWORD, LPVOID, ULONG},
         ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
-        winerror::{ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
+        winerror::{
+            ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
+            ERROR_NO_MORE_FILES,
+        },
     },
     um::{
         fileapi::FILE_ID_BOTH_DIR_INFO,
         ioapiset::DeviceIoControl,
         minwinbase::{FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, LPOVERLAPPED},
         winbase::GetFileInformationByHandleEx,
-        winioctl::FSCTL_SET_REPARSE_POINT,
+        winioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
         winnt::{
             DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
             FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE,
-            IO_REPARSE_TAG_SYMLINK, PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE,
-            SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
+            IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+            PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE, SECURITY_DESCRIPTOR,
+            SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
         },
     },
 };
@@ -60,6 +65,7 @@ pub(crate) struct OpenOptionsImpl {
     truncate: bool,
     read: bool,
     write: OpenOptionsWriteMode,
+    follow: Option<bool>,
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
@@ -88,6 +94,16 @@ impl fmt::Debug for OpenOptionsImpl {
 struct DesiredAccess(u32);
 struct FileDisposition(u32);
 struct CreateOptions(u32);
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct OpenSymLink(bool);
+
+fn make_already_exists_error() -> io::Error {
+    io::Error::from(ErrorKind::AlreadyExists)
+}
+
+pub(crate) fn make_loop_error() -> io::Error {
+    io::Error::from_raw_os_error(winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)
+}
 
 impl OpenOptionsImpl {
     pub fn read(&mut self, read: bool) {
@@ -110,14 +126,26 @@ impl OpenOptionsImpl {
         self.create_new = create_new;
     }
 
-    fn do_create_file(
+    pub fn follow(&mut self, follow: bool) {
+        self.follow = Some(follow);
+    }
+
+    // NtCreateFile has too many arguments, and making a builder in our build
+    // interface itself seems overkill.
+    #[allow(clippy::too_many_arguments)]
+    fn do_create_file<MLE>(
         &self,
         f: &mut File,
         path: &Path,
         desired_access: DesiredAccess,
         create_disposition: FileDisposition,
         create_options: CreateOptions,
-    ) -> Result<File> {
+        open_symlink: OpenSymLink,
+        make_link_error: MLE,
+    ) -> Result<File>
+    where
+        MLE: Fn() -> io::Error,
+    {
         let mut handle = MaybeUninit::uninit();
         let mut object_attributes: OBJECT_ATTRIBUTES = unsafe { zeroed() };
         object_attributes.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
@@ -194,22 +222,31 @@ impl OpenOptionsImpl {
         // FILE_SUPERSEDED
         // FILE_EXISTS
         // FILE_DOES_NOT_EXIST
-        // we want FILE_CREATED only
-        // shouldn't ever fail, but JIC.
         let information = ULONG::try_from(status_block.Information)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         match information {
             FILE_CREATED | FILE_OPENED | FILE_OVERWRITTEN => {
-                // success, we have an FD
-                Ok(unsafe { File::from_raw_handle(handle.assume_init() as *mut c_void) })
+                // could be success : we have an FD
+                // Check if we're opening
+                let handle = unsafe { handle.assume_init() };
+                if !open_symlink.0 && Self::is_symlink(handle)? {
+                    // we found a symlink (due to setting
+                    // FILE_OPEN_REPARSE_POINT), but we're not permitted to open
+                    // the link itself (e.g. follow(false) was set). Synthesis an OS error.
+                    Err(make_link_error())
+                } else {
+                    Ok(unsafe { File::from_raw_handle(handle as *mut c_void) })
+                }
             }
 
             FILE_SUPERSEDED | FILE_EXISTS | FILE_DOES_NOT_EXIST => {
+                // Not covered by test coverage yet.
                 unimplemented!("expected FILE_CREATED|FILE_OPENED|FILE_OVERWRITTEN|FILE_SUPERSEDED|FILE_EXISTS|FILE_DOES_NOT_EXIST, got {}", status_block.Information);
             }
 
             _ => {
+                // Not covered by test coverage yet.
                 unimplemented!("expected FILE_CREATED|FILE_OPENED|FILE_OVERWRITTEN|FILE_SUPERSEDED|FILE_EXISTS|FILE_DOES_NOT_EXIST, got {}", status_block.Information);
             }
         }
@@ -227,22 +264,83 @@ impl OpenOptionsImpl {
             // create-or-open by calling .create(true) themselves.
             create_disposition.0 |= FILE_CREATE;
         }
-        let create_options = CreateOptions(FILE_DIRECTORY_FILE);
-        self.do_create_file(f, path, desired_access, create_disposition, create_options)
+        // we must open a directory.
+        // For consistency with unix.rs, never follow a symlink at the location of
+        // the mkdir target.
+        let create_options = CreateOptions(FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT);
+        let open_symlink = OpenSymLink(false);
+        self.do_create_file(
+            f,
+            path,
+            desired_access,
+            create_disposition,
+            create_options,
+            open_symlink,
+            make_already_exists_error,
+        )
+        .map_err(|e| {
+            if e.raw_os_error() == Some(ERROR_DIRECTORY as i32) {
+                // NotADirectory happens when opening with FILE_OPEN_IF a Symlink
+                // with link-type File and FILE_OPEN_REPARSE_POINT - nofollow. But
+                // AlreadyExists is a better error consistent with Unix : the
+                // NotADirectory error is leakage from the implementation of
+                // symlinks on Windows.
+                io::Error::new(ErrorKind::AlreadyExists, e)
+            } else {
+                e
+            }
+        })
     }
 
     pub fn open_at(&self, f: &mut File, path: &Path) -> Result<File> {
         let desired_access = self.get_access_mode()?;
         let create_disposition = self.get_file_disposition(false)?;
-        // create options needs to be controlled through OpenOptions too.
+        // TODO: create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
         // requires SYNCHRONIZE on the access mode. We should permit users to
         // expect particular types, but until we make that explicit, we need to
         // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
-        let create_options = CreateOptions(FILE_SYNCHRONOUS_IO_NONALERT);
+        let create_options = CreateOptions(
+            FILE_SYNCHRONOUS_IO_NONALERT
+                | if matches!(self.follow, Some(false)) || self.create_new {
+                    // Follow is disabled, or create_new, which for unix is ==
+                    // O_EXCL | O_CREAT and defined as rejecting a symlink at
+                    // the target path.
+                    FILE_OPEN_REPARSE_POINT
+                } else {
+                    0
+                },
+        );
+        let open_symlink = OpenSymLink(self.follow.unwrap_or(true));
+        let error_on_symlink = if open_symlink == OpenSymLink(false) {
+            // Be compatible with Unix code - O_NOFOLLOW without O_PATH generates ELOOP.
+            make_loop_error
+        } else {
+            make_already_exists_error
+        };
 
-        self.do_create_file(f, path, desired_access, create_disposition, create_options)
+        self.do_create_file(
+            f,
+            path,
+            desired_access,
+            create_disposition,
+            create_options,
+            open_symlink,
+            error_on_symlink,
+        )
+        .map_err(|e| {
+            if e.raw_os_error() == Some(ERROR_DIRECTORY as i32) {
+                // NotADirectory happens when opening with FILE_OVERWRITE_IF
+                // (e.g. truncate) a Symlink with link-type Dir and follow enabled. But
+                // AlreadyExists is a better error consistent with Unix : the
+                // NotADirectory error is leakage from the implementation of
+                // symlinks on Windows. Here we need to retry
+                io::Error::new(ErrorKind::AlreadyExists, e)
+            } else {
+                e
+            }
+        })
     }
 
     pub fn symlink_at(
@@ -262,6 +360,7 @@ impl OpenOptionsImpl {
                 .create_new(true)
                 .write(OpenOptionsWriteMode::Write)
                 .open_at(d, linkname),
+            LinkEntryType::Other => unimplemented!("can't create reparse points [yet["),
         }?;
 
         // 2 - convert it to a symlink
@@ -309,8 +408,8 @@ impl OpenOptionsImpl {
             unsafe { reparse_data_vec.align_to_mut::<REPARSE_DATA_BUFFER>() };
         if !head.is_empty() {
             // TODO: use body instead later on?
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
                 "non-aligned struct allocation",
             ));
         }
@@ -319,9 +418,8 @@ impl OpenOptionsImpl {
         reparse_data.ReparseTag = IO_REPARSE_TAG_SYMLINK;
 
         let to_u16 = |l| {
-            TryFrom::try_from(l).map_err(|_e| {
-                std::io::Error::new(std::io::ErrorKind::Other, "path length too long")
-            })
+            TryFrom::try_from(l)
+                .map_err(|_e| io::Error::new(io::ErrorKind::Other, "path length too long"))
         };
 
         reparse_data.ReparseDataLength = to_u16(reparse_data_length)?;
@@ -371,6 +469,51 @@ impl OpenOptionsImpl {
         cvt::cvt(bool_result).map(|_v| ())
     }
 
+    fn is_symlink(handle: *mut ctypes::c_void) -> Result<bool> {
+        let mut reparse_buffer: Aligned<
+            A8,
+            [MaybeUninit<u8>; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize],
+        > = Aligned([MaybeUninit::<u8>::uninit(); MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize]);
+        let mut out_size = 0;
+        let bool_result = unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_GET_REPARSE_POINT,
+                NULL,
+                0,
+                // output buffer
+                reparse_buffer.as_mut_ptr().cast(),
+                // size of output buffer
+                MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+                // number of bytes returned
+                &mut out_size,
+                // OVERLAPPED structure
+                ptr::null_mut(),
+            )
+        };
+        let result = cvt::cvt(bool_result);
+        if let Err(e) = result {
+            if e.raw_os_error() != Some(ERROR_NOT_A_REPARSE_POINT as i32) {
+                return Err(e);
+            }
+            return Ok(false);
+        };
+        if out_size < size_of::<ULONG>() as u32 {
+            // Success but not enough data to read the tag
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Insufficient data from DeviceIOControl",
+            ));
+        }
+        let reparse_buffer = reparse_buffer.as_ptr().cast::<REPARSE_DATA_BUFFER>();
+        Ok(unsafe {
+            matches!(
+                (*reparse_buffer).ReparseTag,
+                IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT
+            )
+        })
+    }
+
     fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
         if self.create_new {
             Ok(FileDisposition(FILE_CREATE))
@@ -385,9 +528,6 @@ impl OpenOptionsImpl {
         } else {
             // just open the existing file.
             Ok(FileDisposition(FILE_OPEN))
-            // Err(std::io::Error::from_raw_os_error(
-            //     ERROR_INVALID_PARAMETER as i32,
-            // ))
         }
     }
 
@@ -410,9 +550,7 @@ impl OpenOptionsImpl {
 
         if desired_access == SYNCHRONIZE {
             // neither read nor write modes selected
-            return Err(std::io::Error::from_raw_os_error(
-                ERROR_INVALID_PARAMETER as i32,
-            ));
+            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
         }
         Ok(DesiredAccess(desired_access))
     }
@@ -686,8 +824,8 @@ impl<'a> ReadDirImpl<'a> {
 
     fn fill_buffer(&mut self, class: ULONG) -> Result<bool> {
         let buffer = self.buffer.as_mut().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
+            io::Error::new(
+                io::ErrorKind::Other,
                 "Attempt to fill buffer after end of dir",
             )
         })?;
@@ -781,25 +919,22 @@ mod tests {
 
     #[test]
     // #[should_panic(expected = "Cannot create a file when that file already exists.")]
-    fn mkdir_at_case_insensitive() {
+    fn mkdir_at_case_insensitive() -> Result<()> {
         // This tests that when case insensitivity is enabled, making a
         // colliding dir fails - but we have no way to easily/reliably turn case
         // insensitivity off for now. So its a bit unnecessary.
-        || -> Result<()> {
-            let tmp = TempDir::new()?;
-            let parent = tmp.path().join("parent");
-            let renamed_parent = tmp.path().join("renamed-parent");
-            std::fs::create_dir(&parent)?;
-            let mut parent_file = open_dir(&parent)?;
-            rename(parent, renamed_parent)?;
-            let mut create_opt = OpenOptions::default();
-            create_opt.create(true);
-            create_opt.mkdir_at(&mut parent_file, "child")?;
-            create_opt.object_attributes(OBJ_CASE_INSENSITIVE);
-            // Incorrectly passes because we're just using .create() now
-            create_opt.mkdir_at(&mut parent_file, "Child")?;
-            Ok(())
-        }()
-        .unwrap();
+        let tmp = TempDir::new()?;
+        let parent = tmp.path().join("parent");
+        let renamed_parent = tmp.path().join("renamed-parent");
+        std::fs::create_dir(&parent)?;
+        let mut parent_file = open_dir(&parent)?;
+        rename(parent, renamed_parent)?;
+        let mut create_opt = OpenOptions::default();
+        create_opt.create(true);
+        create_opt.mkdir_at(&mut parent_file, "child")?;
+        create_opt.object_attributes(OBJ_CASE_INSENSITIVE);
+        // Incorrectly passes because we're just using .create() now
+        create_opt.mkdir_at(&mut parent_file, "Child")?;
+        Ok(())
     }
 }

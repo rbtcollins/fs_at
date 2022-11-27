@@ -22,12 +22,13 @@ tempfile = "3.3.0"
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2.137"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
-# MAX_PATH and more) : consider it weak and something we can remove if expedient
+# MAX_PATH and more : consider it weak and something we can remove if expedient
 # later.
 nix = { version = "0.25.0", default-features = false, features = ["dir"] }
 
 
 [target.'cfg(windows)'.dependencies]
+aligned = "0.4.1"
 ntapi = "0.4.0"
 winapi = { version = "0.3", features = [
     "ntdef",
