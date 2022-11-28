@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "fs_at"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "aligned",
  "cfg-if 1.0.0",
