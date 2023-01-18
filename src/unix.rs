@@ -184,6 +184,19 @@ impl OpenOptionsImpl {
         cvt_r(|| unsafe { libc::symlinkat(target.as_ptr(), d.as_raw_fd(), linkname.as_ptr()) })
             .map(|_| ())
     }
+
+    pub fn rmdir_at(&self, d: &mut File, p: &Path) -> Result<()> {
+        self.unlinkat(d, p, libc::AT_REMOVEDIR)
+    }
+
+    pub fn unlink_at(&self, d: &mut File, p: &Path) -> Result<()> {
+        self.unlinkat(d, p, 0)
+    }
+
+    fn unlinkat(&self, d: &mut File, p: &Path, flags: c_int) -> Result<()> {
+        let path = p.as_cstring()?;
+        cvt_r(|| unsafe { libc::unlinkat(d.as_raw_fd(), path.as_ptr(), flags) }).map(|_| ())
+    }
 }
 
 pub trait OpenOptionsExt {

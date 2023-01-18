@@ -294,6 +294,34 @@ impl OpenOptions {
         )
     }
 
+    /// Unlink a non-directory at a path relative to d.
+    ///
+    /// If the path referred to is a symbolic link, the link itself is removed.
+    ///
+    /// Platform specific: some platforms treat unlink and rmdir as equivalent.
+    /// Others such as Mac OSX do not, and rmdir must be used when deleting a
+    /// directory.
+    pub fn unlink_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        self._impl
+            .unlink_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
+    }
+
+    /// Remove a directory at a path relative to d.
+    ///
+    /// Platform specific: some platforms treat unlink and rmdir as equivalent.
+    /// Others such as Mac OSX do not, and rmdir must be used when deleting a
+    /// directory.
+    pub fn rmdir_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        self._impl
+            .rmdir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
+    }
+
     fn ensure_rootless(p: &Path) -> Result<&Path> {
         if p.has_root() {
             return Err(Error::new(
@@ -414,9 +442,15 @@ mod tests {
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(
             winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}
+            #[allow(non_snake_case)]
+            fn NotADirectory() -> Error { Error::from_raw_os_error(
+                winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32
+            )}
         } else {
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(libc::ELOOP)}
+            #[allow(non_snake_case)]
+            fn NotADirectory() -> Error { Error::from_raw_os_error(libc::ENOTDIR)}
         }
     }
 
@@ -443,6 +477,10 @@ mod tests {
         // perform an open call on a dir ? [should this be extension only?]
         #[allow(unused)]
         OpenDir,
+        // perform an unlink of a non-dir
+        Unlink,
+        // perform a rmdir of a dir
+        RmDir,
     }
 
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
@@ -558,11 +596,11 @@ mod tests {
 
         if create_in_advance {
             match test.op {
-                Op::MkDir => {
+                Op::MkDir | Op::RmDir => {
                     options.mkdir_at(&mut parent_file, actual_child)?;
                 }
                 Op::OpenDir => (),
-                Op::OpenFile => {
+                Op::OpenFile | Op::Unlink => {
                     let mut first_file = OpenOptions::default()
                         .create(true)
                         .write(OpenOptionsWriteMode::Write)
@@ -592,47 +630,75 @@ mod tests {
             }
         }
 
-        let res = match test.op {
-            Op::MkDir => options.mkdir_at(&mut parent_file, &child_name),
-            Op::OpenDir => unimplemented!(),
-            Op::OpenFile => options.open_at(&mut parent_file, &child_name),
-        };
-        let mut child = match (res, err) {
-            (Ok(child), None) => child,
-            (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
-            (Err(e), None) => panic!("unexpected error {:?}", e),
-            (Err(e), Some(expected_e)) => {
-                assert_eq!(e.kind(), expected_e.kind(), "{:?} != {:?}", e, expected_e);
-                return Ok(());
-            }
-        };
-        let expected = renamed_parent.join(actual_child);
-        let metadata = expected.symlink_metadata()?;
-        match test.op {
-            Op::MkDir => assert!(metadata.is_dir()),
-            Op::OpenDir => (),
-            Op::OpenFile => {
-                assert!(metadata.is_file());
-                // If the file was truncated, it will be 0-length.
-                // If the file is new it will be 0-length.
-                let initial_length = metadata.len();
-                if test.truncate || !create_in_advance {
-                    assert_eq!(initial_length, 0);
-                } else {
-                    assert_eq!(initial_length, 16);
+        if matches!(test.op, Op::MkDir | Op::OpenDir | Op::OpenFile) {
+            // functions that return a file handle
+            let res = match test.op {
+                Op::MkDir => options.mkdir_at(&mut parent_file, &child_name),
+                Op::OpenDir => unimplemented!(),
+                Op::OpenFile => options.open_at(&mut parent_file, &child_name),
+                _ => unreachable!(),
+            };
+            let mut child = match (res, err) {
+                (Ok(child), None) => child,
+                (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
+                (Err(e), None) => panic!("unexpected error {:?}", e),
+                (Err(e), Some(expected_e)) => {
+                    assert_eq!(e.kind(), expected_e.kind(), "{:?} != {:?}", e, expected_e);
+                    return Ok(());
                 }
-                if test.write != OpenOptionsWriteMode::None {
-                    child.seek(SeekFrom::Start(10))?;
-                    assert_eq!(10, child.write(b"some data\n")?);
-                    if test.write == OpenOptionsWriteMode::Write {
-                        assert_eq!(expected.symlink_metadata()?.len(), 20);
+            };
+            let expected = renamed_parent.join(actual_child);
+            let metadata = expected.symlink_metadata()?;
+            match test.op {
+                Op::MkDir => assert!(metadata.is_dir()),
+                Op::OpenDir => (),
+                Op::OpenFile => {
+                    assert!(metadata.is_file());
+                    // If the file was truncated, it will be 0-length.
+                    // If the file is new it will be 0-length.
+                    let initial_length = metadata.len();
+                    if test.truncate || !create_in_advance {
+                        assert_eq!(initial_length, 0);
                     } else {
-                        // The write location is ignored in append mode
-                        assert_eq!(expected.symlink_metadata()?.len(), initial_length + 10);
+                        assert_eq!(initial_length, 16);
                     }
+                    if test.write != OpenOptionsWriteMode::None {
+                        child.seek(SeekFrom::Start(10))?;
+                        assert_eq!(10, child.write(b"some data\n")?);
+                        if test.write == OpenOptionsWriteMode::Write {
+                            assert_eq!(expected.symlink_metadata()?.len(), 20);
+                        } else {
+                            // The write location is ignored in append mode
+                            assert_eq!(expected.symlink_metadata()?.len(), initial_length + 10);
+                        }
+                    }
+                    //
                 }
-                //
+                _ => unreachable!(),
             }
+        } else {
+            // Functions that delete something
+            let res = match test.op {
+                Op::RmDir => options.rmdir_at(&mut parent_file, &child_name),
+                Op::Unlink => options.unlink_at(&mut parent_file, &child_name),
+                _ => unreachable!(),
+            };
+            match (res, err) {
+                (Ok(()), None) => (),
+                (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
+                (Err(e), None) => panic!("unexpected error {:?}", e),
+                (Err(e), Some(expected_e)) => {
+                    assert_eq!(e.kind(), expected_e.kind(), "{:?} != {:?}", e, expected_e);
+                    return Ok(());
+                }
+            };
+            // in the non-error case child_name should have been removed.
+            let expected = renamed_parent.join(&child_name);
+            match expected.symlink_metadata() {
+                Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+                Ok(_) => panic!("{child_name:?} not deleted"),
+            }?;
         }
         Ok(())
     }
@@ -681,9 +747,13 @@ mod tests {
         } else if test.symlink_mode == SymlinkMode::LinkIsTarget && test.follow == Some(false) {
             // follow(false) causes every openat to fail ELOOP when the path as given resolves to a link itself.
             Some(FileSystemLoopError())
+        } else if test.symlink_mode == SymlinkMode::LinkIsTarget && (test.op == Op::RmDir) {
+            // can't rmdir a symlink
+            Some(NotADirectory())
         } else {
             None
         };
+
         if test.create_new {
             // run three tests: one that creates the path, and one that expects
             // an error operating on the existing path, and one that expects an
@@ -696,17 +766,38 @@ mod tests {
             // the existing path
             _check_behaviour(test.clone(), true, err.as_ref(), counter)?;
             _check_behaviour(test, false, err.as_ref(), counter)
-        } else {
-            // without create/create_new/truncate, openat is only useful on
-            // existing files.
-            if test.op != Op::MkDir {
-                return Ok(());
-            }
+        } else if matches!(test.op, Op::MkDir) {
             // run two tests: one that creates the path where it didn't exist
-            // and one that precreates the file and expects an error
+            // and one that precreates the path and expects an error
             _check_behaviour(test.clone(), false, err.as_ref(), counter)?;
             let err = Error::from(ErrorKind::AlreadyExists);
             _check_behaviour(test, true, Some(&err), counter)
+        } else if matches!(test.op, Op::RmDir) {
+            // run two tests: one that unlinks a missing path and expects an error
+            // and one that creates the path and expects success when operating on a dir
+            // or NotADirectory when operating on a symlink
+            let missing_err = if test.symlink_mode == SymlinkMode::LinkIsTarget {
+                // when we rmdir a symlink (at least on linux)
+                NotADirectory()
+            } else {
+                // when we rmdir a missing path we get NotFound.
+                Error::from(ErrorKind::NotFound)
+            };
+            _check_behaviour(test.clone(), false, Some(&missing_err), counter)?;
+            _check_behaviour(test, true, err.as_ref(), counter)
+        } else if matches!(test.op, Op::Unlink) {
+            // run two tests: one that unlinks a missing path and expects an error
+            // except when operating on a symlink.
+            // and one that creates the path and expects success.
+            let missing_err = if test.symlink_mode == SymlinkMode::LinkIsTarget {
+                None
+            } else {
+                Some(Error::from(ErrorKind::NotFound))
+            };
+            _check_behaviour(test.clone(), false, missing_err.as_ref(), counter)?;
+            _check_behaviour(test, true, err.as_ref(), counter)
+        } else {
+            return Ok(());
         }
     }
 
@@ -742,6 +833,53 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_rmdir() -> Result<()> {
+        let mut counter = 0;
+
+        for symlink_mode in [
+            SymlinkMode::None,
+            SymlinkMode::LinkIsParent,
+            SymlinkMode::LinkIsTarget,
+        ] {
+            for symlink_entry_type in [LinkEntryType::Dir, LinkEntryType::File] {
+                check_behaviour(
+                    Test::default()
+                        .symlink_mode(symlink_mode)
+                        .symlink_entry_type(symlink_entry_type)
+                        .op(Op::RmDir),
+                    &mut counter,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_unlink() -> Result<()> {
+        let mut counter = 0;
+
+        for symlink_mode in [
+            SymlinkMode::None,
+            SymlinkMode::LinkIsParent,
+            SymlinkMode::LinkIsTarget,
+        ] {
+            for symlink_entry_type in [LinkEntryType::Dir, LinkEntryType::File] {
+                if counter >= 8 {
+                    println!("here");
+                }
+                check_behaviour(
+                    Test::default()
+                        .symlink_mode(symlink_mode)
+                        .symlink_entry_type(symlink_entry_type)
+                        .op(Op::Unlink),
+                    &mut counter,
+                )?;
             }
         }
         Ok(())
