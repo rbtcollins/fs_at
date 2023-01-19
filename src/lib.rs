@@ -561,8 +561,7 @@ mod tests {
         counter: &mut u32,
     ) -> Result<()> {
         eprintln!(
-            "testing idx: {counter}, op: {:?} create_in_advance: {}, err: {:?}",
-            test, create_in_advance, err
+            "testing idx: {counter}, op: {test:?} create_in_advance: {create_in_advance}, err: {err:?}"
         );
         *counter += 1;
         let (_tmp, mut parent_file, renamed_parent) = setup()?;
@@ -640,10 +639,10 @@ mod tests {
             };
             let mut child = match (res, err) {
                 (Ok(child), None) => child,
-                (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
-                (Err(e), None) => panic!("unexpected error {:?}", e),
+                (Ok(_), Some(e)) => panic!("unexpected success {e:?}"),
+                (Err(e), None) => panic!("unexpected error {e:?}"),
                 (Err(e), Some(expected_e)) => {
-                    assert_eq!(e.kind(), expected_e.kind(), "{:?} != {:?}", e, expected_e);
+                    assert_eq!(e.kind(), expected_e.kind(), "{e:?} != {expected_e:?}");
                     return Ok(());
                 }
             };
@@ -685,10 +684,10 @@ mod tests {
             };
             match (res, err) {
                 (Ok(()), None) => (),
-                (Ok(_), Some(e)) => panic!("unexpected success {:?}", e),
-                (Err(e), None) => panic!("unexpected error {:?}", e),
+                (Ok(_), Some(e)) => panic!("unexpected success {e:?}"),
+                (Err(e), None) => panic!("unexpected error {e:?}"),
                 (Err(e), Some(expected_e)) => {
-                    assert_eq!(e.kind(), expected_e.kind(), "{:?} != {:?}", e, expected_e);
+                    assert_eq!(e.kind(), expected_e.kind(), "{e:?} != {expected_e:?}");
                     return Ok(());
                 }
             };
@@ -824,7 +823,7 @@ mod tests {
             _check_behaviour(test.clone(), false, missing_err.as_ref(), counter)?;
             _check_behaviour(test, true, err.as_ref(), counter)
         } else {
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -981,12 +980,11 @@ mod tests {
             children.len(),
             "directory contains 5 entries (., .., 1, 2, child)"
         );
-        assert!(dir_present(&children, OsStr::new("1")), "{:?}", children);
-        assert!(dir_present(&children, OsStr::new("2")), "{:?}", children);
+        assert!(dir_present(&children, OsStr::new("1")), "{children:?}");
+        assert!(dir_present(&children, OsStr::new("2")), "{children:?}");
         assert!(
             dir_present(&children, OsStr::new("child")),
-            "{:?}",
-            children
+            "{children:?}"
         );
 
         {
@@ -994,8 +992,8 @@ mod tests {
                 .read(true)
                 .open_at(&mut parent_dir, "child")?;
             let children = read_dir(&mut child)?.collect::<Result<Vec<_>>>()?;
-            assert_eq!(3, children.len(), "{:?}", children);
-            assert!(dir_present(&children, OsStr::new("3")), "{:?}", children);
+            assert_eq!(3, children.len(), "{children:?}");
+            assert!(dir_present(&children, OsStr::new("3")), "{children:?}");
         }
         Ok(())
     }
