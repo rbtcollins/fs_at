@@ -153,7 +153,7 @@ impl OpenOptionsImpl {
     #[allow(clippy::too_many_arguments)]
     fn do_create_file<MLE>(
         &self,
-        f: &mut File,
+        f: &File,
         path: &Path,
         desired_access: DesiredAccess,
         create_disposition: FileOpenDisposition,
@@ -273,7 +273,7 @@ impl OpenOptionsImpl {
         }
     }
 
-    pub fn mkdir_at(&self, f: &mut File, path: &Path) -> Result<File> {
+    pub fn mkdir_at(&self, f: &File, path: &Path) -> Result<File> {
         // get_access_mode must not be used for opening a directory
         // ... see docs or we must have file use the Ext trait always.
         let desired_access =
@@ -312,7 +312,7 @@ impl OpenOptionsImpl {
         })
     }
 
-    pub fn open_at(&self, f: &mut File, path: &Path) -> Result<File> {
+    pub fn open_at(&self, f: &File, path: &Path) -> Result<File> {
         let desired_access = self.get_access_mode()?;
         let create_disposition = self.get_file_disposition(false)?;
         // TODO: create options needs to be controlled through OpenOptions too.
@@ -363,7 +363,7 @@ impl OpenOptionsImpl {
 
     pub fn symlink_at(
         &self,
-        d: &mut File,
+        d: &File,
         linkname: &Path,
         link_entry_type: LinkEntryType,
         target: &Path,
@@ -487,21 +487,16 @@ impl OpenOptionsImpl {
         cvt::cvt(bool_result).map(|_v| ())
     }
 
-    pub fn rmdir_at(&self, f: &mut File, p: &Path) -> Result<()> {
+    pub fn rmdir_at(&self, f: &File, p: &Path) -> Result<()> {
         // we must open a directory
         self.mark_for_deletion(f, p, CreateOptions(FILE_DIRECTORY_FILE))
     }
 
-    pub fn unlink_at(&self, f: &mut File, p: &Path) -> Result<()> {
+    pub fn unlink_at(&self, f: &File, p: &Path) -> Result<()> {
         self.mark_for_deletion(f, p, CreateOptions(0))
     }
 
-    fn mark_for_deletion(
-        &self,
-        f: &mut File,
-        p: &Path,
-        create_options: CreateOptions,
-    ) -> Result<()> {
+    fn mark_for_deletion(&self, f: &File, p: &Path, create_options: CreateOptions) -> Result<()> {
         let desired_access = DesiredAccess(DELETE);
         let create_disposition = FileOpenDisposition(FILE_OPEN);
         // Only delete what was named :- do not do link processing

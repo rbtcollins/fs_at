@@ -60,6 +60,18 @@ cfg_if::cfg_if! {
 /// security descriptors on windows, or mode on unix) using an appropriate
 /// platform specific trait, finishing up with the desired manipulation e.g.
 /// `mkdirat`.
+///
+/// A note on the manipulations: they take a directory handle as &File. This is
+/// believed safe but if you have reason to disagree please file a bug.
+///
+/// - Rust's borrow checker ensures that File::drop() will not be called
+///   concurrently with a manipulation, thus the file will still be open (in the
+///   absence of unsafe Rust or non-Rust libraries)
+/// - the openat family of functions do not document any state changes to the
+///   base fd that names are resolved against. Only `read_dir` is documented as
+///   changing state.
+/// - similarly on Windows, NtCreateFile is not documented as changing any state
+///   when creating a file relative to the handle.
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct OpenOptions {
@@ -228,7 +240,7 @@ impl OpenOptions {
     ///   `openat` syscall to open the created directory. This limitation may be
     ///   lifted in future if the mooted mkdirat2 call gets created.. The mode
     ///   of the new directory defaults to 0o777.
-    pub fn mkdir_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
+    pub fn mkdir_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .mkdir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
@@ -243,7 +255,7 @@ impl OpenOptions {
     /// separator translation: if passing a path containing a separator, it must
     /// be a platform native one. e.g. `foo\\bar` on Windows, vs `foo/bar` on
     /// most other OS's.
-    pub fn open_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
+    pub fn open_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
@@ -277,7 +289,7 @@ impl OpenOptions {
     /// control via an extension trait.
     pub fn symlink_at<P, Q>(
         &self,
-        d: &mut File,
+        d: &File,
         linkname: P,
         entry_type: LinkEntryType,
         target: Q,
@@ -301,7 +313,7 @@ impl OpenOptions {
     /// Platform specific: some platforms treat unlink and rmdir as equivalent.
     /// Others such as Mac OSX do not, and rmdir must be used when deleting a
     /// directory.
-    pub fn unlink_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    pub fn unlink_at<P>(&self, d: &File, p: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
@@ -314,7 +326,7 @@ impl OpenOptions {
     /// Platform specific: some platforms treat unlink and rmdir as equivalent.
     /// Others such as Mac OSX do not, and rmdir must be used when deleting a
     /// directory.
-    pub fn rmdir_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    pub fn rmdir_at<P>(&self, d: &File, p: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
@@ -340,6 +352,21 @@ impl OpenOptions {
 /// To the greatest extent possible the underlying OS semantics are preserved.
 /// That means that `.` and `..` entries are exposed, and that no sort order is
 /// guaranteed by the iterator.
+///
+/// On both unix and Windows directory iteration affects shared mutable state,
+/// thus this iterator holds an &mut File for the lifetime of the iterator. The
+/// workaround - opening a new file - can be performed by users of the library
+/// if desired.
+///
+/// (On Unix fdopendir is used to obtain a directory stream, but as closedir
+/// closes the file descriptor the original descriptor is dup2'd first. But as
+/// dup2 duplicated descriptors share the open file description, the position in
+/// readdir() is shared: permitting other concurrent readdir iterations to be
+/// started concurrently might be memory safe, but its clearly not safe safe.
+///
+/// On Windows a similar situation applies with FileIdBothDirectoryInfo /
+/// FileIdBothDirectoryRestartInfo and DuplicateHandle: DuplicateHandle aliases
+/// into kernel state rather than creating an entirely separate accounting.
 #[derive(Debug)]
 pub struct ReadDir<'a> {
     _impl: ReadDirImpl<'a>,
@@ -982,10 +1009,7 @@ mod tests {
         );
         assert!(dir_present(&children, OsStr::new("1")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("2")), "{children:?}");
-        assert!(
-            dir_present(&children, OsStr::new("child")),
-            "{children:?}"
-        );
+        assert!(dir_present(&children, OsStr::new("child")), "{children:?}");
 
         {
             let mut child = OpenOptions::default()
