@@ -22,7 +22,7 @@ use ntapi::ntioapi::{
 use winapi::{
     ctypes,
     shared::{
-        minwindef::{LPDWORD, LPVOID, ULONG},
+        minwindef::{LPDWORD, LPVOID, TRUE, ULONG},
         ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
         winerror::{
             ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
@@ -30,9 +30,12 @@ use winapi::{
         },
     },
     um::{
-        fileapi::FILE_ID_BOTH_DIR_INFO,
+        fileapi::{SetFileInformationByHandle, FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO},
         ioapiset::DeviceIoControl,
-        minwinbase::{FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, LPOVERLAPPED},
+        minwinbase::{
+            FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+            LPOVERLAPPED,
+        },
         winbase::GetFileInformationByHandleEx,
         winioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
         winnt::{
@@ -58,7 +61,7 @@ pub mod exports {
     pub use winapi::um::winnt::SECURITY_DESCRIPTOR;
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct OpenOptionsImpl {
     create: bool,
     create_new: bool,
@@ -92,10 +95,25 @@ impl fmt::Debug for OpenOptionsImpl {
 }
 
 struct DesiredAccess(u32);
-struct FileDisposition(u32);
+struct FileOpenDisposition(u32);
 struct CreateOptions(u32);
+
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct OpenSymLink(bool);
+enum OpenSymLink<MLE>
+where
+    MLE: Fn() -> io::Error,
+{
+    OpenLinkFile,
+    RaiseError(MLE),
+}
+
+fn open_link_file() -> OpenSymLink<impl Fn() -> io::Error> {
+    // maybe a trait would be easier.
+    #[allow(unused_assignments)]
+    let mut right_type_wrong_value = OpenSymLink::RaiseError(make_already_exists_error);
+    right_type_wrong_value = OpenSymLink::OpenLinkFile;
+    right_type_wrong_value
+}
 
 fn make_already_exists_error() -> io::Error {
     io::Error::from(ErrorKind::AlreadyExists)
@@ -138,10 +156,9 @@ impl OpenOptionsImpl {
         f: &mut File,
         path: &Path,
         desired_access: DesiredAccess,
-        create_disposition: FileDisposition,
+        create_disposition: FileOpenDisposition,
         create_options: CreateOptions,
-        open_symlink: OpenSymLink,
-        make_link_error: MLE,
+        open_symlink: OpenSymLink<MLE>,
     ) -> Result<File>
     where
         MLE: Fn() -> io::Error,
@@ -230,11 +247,15 @@ impl OpenOptionsImpl {
                 // could be success : we have an FD
                 // Check if we're opening
                 let handle = unsafe { handle.assume_init() };
-                if !open_symlink.0 && Self::is_symlink(handle)? {
+
+                if matches!(open_symlink, OpenSymLink::RaiseError(_)) && Self::is_symlink(handle)? {
                     // we found a symlink (due to setting
                     // FILE_OPEN_REPARSE_POINT), but we're not permitted to open
                     // the link itself (e.g. follow(false) was set). Synthesis an OS error.
-                    Err(make_link_error())
+                    match open_symlink {
+                        OpenSymLink::RaiseError(make_link_error) => Err(make_link_error()),
+                        _ => unreachable!(),
+                    }
                 } else {
                     Ok(unsafe { File::from_raw_handle(handle as *mut c_void) })
                 }
@@ -268,7 +289,7 @@ impl OpenOptionsImpl {
         // For consistency with unix.rs, never follow a symlink at the location of
         // the mkdir target.
         let create_options = CreateOptions(FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT);
-        let open_symlink = OpenSymLink(false);
+        let open_symlink = OpenSymLink::RaiseError(make_already_exists_error);
         self.do_create_file(
             f,
             path,
@@ -276,7 +297,6 @@ impl OpenOptionsImpl {
             create_disposition,
             create_options,
             open_symlink,
-            make_already_exists_error,
         )
         .map_err(|e| {
             if e.raw_os_error() == Some(ERROR_DIRECTORY as i32) {
@@ -312,12 +332,11 @@ impl OpenOptionsImpl {
                     0
                 },
         );
-        let open_symlink = OpenSymLink(self.follow.unwrap_or(true));
-        let error_on_symlink = if open_symlink == OpenSymLink(false) {
-            // Be compatible with Unix code - O_NOFOLLOW without O_PATH generates ELOOP.
-            make_loop_error
+        let open_symlink = if self.follow.unwrap_or(true) {
+            OpenSymLink::OpenLinkFile
         } else {
-            make_already_exists_error
+            // Be compatible with Unix code - O_NOFOLLOW without O_PATH generates ELOOP.
+            OpenSymLink::RaiseError(make_loop_error)
         };
 
         self.do_create_file(
@@ -327,7 +346,6 @@ impl OpenOptionsImpl {
             create_disposition,
             create_options,
             open_symlink,
-            error_on_symlink,
         )
         .map_err(|e| {
             if e.raw_os_error() == Some(ERROR_DIRECTORY as i32) {
@@ -469,6 +487,50 @@ impl OpenOptionsImpl {
         cvt::cvt(bool_result).map(|_v| ())
     }
 
+    pub fn rmdir_at(&self, f: &mut File, p: &Path) -> Result<()> {
+        // we must open a directory
+        self.mark_for_deletion(f, p, CreateOptions(FILE_DIRECTORY_FILE))
+    }
+
+    pub fn unlink_at(&self, f: &mut File, p: &Path) -> Result<()> {
+        self.mark_for_deletion(f, p, CreateOptions(0))
+    }
+
+    fn mark_for_deletion(
+        &self,
+        f: &mut File,
+        p: &Path,
+        create_options: CreateOptions,
+    ) -> Result<()> {
+        let desired_access = DesiredAccess(DELETE);
+        let create_disposition = FileOpenDisposition(FILE_OPEN);
+        // Only delete what was named :- do not do link processing
+        let create_options = CreateOptions(create_options.0 | FILE_OPEN_REPARSE_POINT);
+        let open_symlink = open_link_file();
+        let to_remove = self.do_create_file(
+            f,
+            p,
+            desired_access,
+            create_disposition,
+            create_options,
+            open_symlink,
+        )?;
+
+        let mut delete_disposition = FILE_DISPOSITION_INFO {
+            DeleteFile: TRUE as u8,
+        };
+        let bool_result = unsafe {
+            SetFileInformationByHandle(
+                to_remove.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as LPVOID,
+                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        cvt::cvt(bool_result).map(|_v| ())?;
+        Ok(())
+    }
+
     fn is_symlink(handle: *mut ctypes::c_void) -> Result<bool> {
         let mut reparse_buffer: Aligned<
             A8,
@@ -514,20 +576,20 @@ impl OpenOptionsImpl {
         })
     }
 
-    fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileDisposition> {
+    fn get_file_disposition(&self, call_defaults_create: bool) -> Result<FileOpenDisposition> {
         if self.create_new {
-            Ok(FileDisposition(FILE_CREATE))
+            Ok(FileOpenDisposition(FILE_CREATE))
         } else if self.truncate {
-            Ok(FileDisposition(FILE_OVERWRITE_IF))
+            Ok(FileOpenDisposition(FILE_OVERWRITE_IF))
         } else if self.create {
-            Ok(FileDisposition(FILE_OPEN_IF))
+            Ok(FileOpenDisposition(FILE_OPEN_IF))
         } else if call_defaults_create {
             // mkdir should still work without create / truncate called -
             // its poor ergonomics otherwise.
-            Ok(FileDisposition(FILE_CREATE))
+            Ok(FileOpenDisposition(FILE_CREATE))
         } else {
             // just open the existing file.
-            Ok(FileDisposition(FILE_OPEN))
+            Ok(FileOpenDisposition(FILE_OPEN))
         }
     }
 
