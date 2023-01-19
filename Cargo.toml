@@ -8,7 +8,7 @@ name = "fs_at"
 readme = "README.md"
 repository = "https://github.com/rbtcollins/fs_at.git"
 rust-version = "1.62.0"
-version = "0.0.4"
+version = "0.0.5"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,7 +24,7 @@ libc = "0.2.137"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more : consider it weak and something we can remove if expedient
 # later.
-nix = { version = "0.25.0", default-features = false, features = ["dir"] }
+nix = { version = "0.26.0", default-features = false, features = ["dir"] }
 
 
 [target.'cfg(windows)'.dependencies]
