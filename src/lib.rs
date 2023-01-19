@@ -444,7 +444,7 @@ mod tests {
             winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}
             #[allow(non_snake_case)]
             fn NotADirectory() -> Error { Error::from_raw_os_error(
-                winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32
+                winapi::shared::winerror::ERROR_DIRECTORY as i32
             )}
         } else {
             #[allow(non_snake_case)]
@@ -748,8 +748,22 @@ mod tests {
             // follow(false) causes every openat to fail ELOOP when the path as given resolves to a link itself.
             Some(FileSystemLoopError())
         } else if test.symlink_mode == SymlinkMode::LinkIsTarget && (test.op == Op::RmDir) {
-            // can't rmdir a symlink
-            Some(NotADirectory())
+            #[cfg(windows)]
+            {
+                if test.symlink_entry_type == LinkEntryType::Dir {
+                    // on windows symlinks can be directories
+                    None
+                } else {
+                    // or they can be files
+                    Some(NotADirectory())
+                }
+            }
+
+            #[cfg(not(windows))]
+            {
+                // can't rmdir a symlink on unix ...
+                Some(NotADirectory())
+            }
         } else {
             None
         };
@@ -777,13 +791,26 @@ mod tests {
             // and one that creates the path and expects success when operating on a dir
             // or NotADirectory when operating on a symlink
             let missing_err = if test.symlink_mode == SymlinkMode::LinkIsTarget {
-                // when we rmdir a symlink (at least on linux)
-                NotADirectory()
+                // On Windows, the link itself may be a dir, which can then be
+                // rmdired. Or the link may be a file, where rmdir is wrong, but seems to succeed. Thats a kernel concern!.
+                #[cfg(windows)]
+                {
+                    if test.symlink_entry_type == LinkEntryType::File {
+                        Some(NotADirectory())
+                    } else {
+                        None
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    // when we rmdir a symlink (at least on linux)
+                    Some(NotADirectory())
+                }
             } else {
                 // when we rmdir a missing path we get NotFound.
-                Error::from(ErrorKind::NotFound)
+                Some(Error::from(ErrorKind::NotFound))
             };
-            _check_behaviour(test.clone(), false, Some(&missing_err), counter)?;
+            _check_behaviour(test.clone(), false, missing_err.as_ref(), counter)?;
             _check_behaviour(test, true, err.as_ref(), counter)
         } else if matches!(test.op, Op::Unlink) {
             // run two tests: one that unlinks a missing path and expects an error
@@ -870,9 +897,6 @@ mod tests {
             SymlinkMode::LinkIsTarget,
         ] {
             for symlink_entry_type in [LinkEntryType::Dir, LinkEntryType::File] {
-                if counter >= 8 {
-                    println!("here");
-                }
                 check_behaviour(
                     Test::default()
                         .symlink_mode(symlink_mode)
