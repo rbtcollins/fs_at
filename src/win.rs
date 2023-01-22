@@ -9,7 +9,7 @@ use std::{
     os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
     path::Path,
     ptr::{self, null_mut},
-    slice,
+    slice, sync::atomic::{AtomicBool, Ordering},
 };
 
 use aligned::{Aligned, A8};
@@ -26,7 +26,7 @@ use winapi::{
         ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
         winerror::{
             ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
-            ERROR_NO_MORE_FILES,
+            ERROR_NO_MORE_FILES, ERROR_ACCESS_DENIED,
         },
     },
     um::{
@@ -122,6 +122,11 @@ fn make_already_exists_error() -> io::Error {
 pub(crate) fn make_loop_error() -> io::Error {
     io::Error::from_raw_os_error(winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)
 }
+
+// Cache the workaround for https://twitter.com/rbtcollins/status/1617211985384407044
+static PROCMON_WORKAROUND_CHECKED: once_cell::sync::Lazy<AtomicBool> = once_cell::sync::Lazy::new(||false.into());
+static PROCMON_WORKAROUND_VALUE: once_cell::sync::Lazy<AtomicBool> = once_cell::sync::Lazy::new(||false.into());
+const FS_AT_WORKAROUND_PROCMON: &'static str = "FS_AT_WORKAROUND_PROCMON";
 
 impl OpenOptionsImpl {
     pub fn read(&mut self, read: bool) {
@@ -551,6 +556,26 @@ impl OpenOptionsImpl {
         let result = cvt::cvt(bool_result);
         if let Err(e) = result {
             if e.raw_os_error() != Some(ERROR_NOT_A_REPARSE_POINT as i32) {
+                // This is ugly. But procmon seems to interfere.
+                if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+                    let workaround = if !AtomicBool::load(&PROCMON_WORKAROUND_CHECKED, Ordering::Relaxed) {
+                        use std::env::var;
+                        let workaround = var(FS_AT_WORKAROUND_PROCMON).is_ok();
+                        AtomicBool::store(&PROCMON_WORKAROUND_VALUE,
+                            workaround, Ordering::Relaxed);
+                            AtomicBool::store(&PROCMON_WORKAROUND_CHECKED, true, Ordering::Relaxed);
+                            workaround
+                    } else {AtomicBool::load(&PROCMON_WORKAROUND_VALUE,
+                            Ordering::Relaxed)
+                    };
+                    if workaround {
+                        // run under procmon this library receives ACCESS_DENIED
+                        // on error that would otherwise be
+                        // ERROR_NOT_A_REPARSE_POINT.
+                        // this could mask other errors too but this code path is opt-in.
+                        return Ok(false);
+                    }
+                }
                 return Err(e);
             }
             return Ok(false);
