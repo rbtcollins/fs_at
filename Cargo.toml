@@ -14,16 +14,18 @@ version = "0.0.5"
 
 [features]
 default = []
-"log" = ["dep:log"]
+log = ["dep:log"]
 "workaround-procmon" = ["dep:once_cell"]
 
 [dependencies]
 cfg-if = "1.0.0"
 cvt = "0.1.1"
+env_logger = "0.10.0"
 log = { version = "0.4.17", optional = true }
 
 [dev-dependencies]
 tempfile = "3.3.0"
+test-log = "0.2.11"
 
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2.137"

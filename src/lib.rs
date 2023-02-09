@@ -479,6 +479,7 @@ mod tests {
     };
 
     use tempfile::TempDir;
+    use test_log::test;
 
     use crate::{
         read_dir, testsupport::open_dir, DirEntry, LinkEntryType, OpenOptions, OpenOptionsWriteMode,
@@ -487,10 +488,6 @@ mod tests {
     // Can be inlined when more_io_errors stablises
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
-
-            use winapi::um::winbase::{ FILE_FLAG_OPEN_REPARSE_POINT};
-
-            use super::win::OpenOptionsExt;
 
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(

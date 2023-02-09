@@ -343,6 +343,7 @@ mod tests {
     };
 
     use tempfile::TempDir;
+    use test_log::test;
 
     use crate::{os::unix::OpenOptionsExt, testsupport::open_dir, OpenOptions};
 
