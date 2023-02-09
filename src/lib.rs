@@ -33,6 +33,18 @@
 //! directory or truncating a file at both the link target and the link source.
 //!
 //! Truncate+nofollow also varies by platform: See OpenOptions::truncate.
+//!
+//! Caveats:
+//! - On windows, procmon will cause the symlink resolution check to receive an
+//!   incorrect error code. Enabling the workaround-procmon feature and setting
+//!   FS_AT_WORKAROUND_PROCMON will treat ACCESS_DENIED as
+//!   ERROR_NOT_REPARSE_POINT.
+//!   https://twitter.com/rbtcollins/status/1617211985384407044
+//!
+//! Feature flags:
+//! - workaround-procmon: enables the FS_AT_WORKAROUND_PROCMON environment
+//!   variable.
+//! - log: enables trace log messages for debugging
 
 use std::{
     ffi::OsStr,
@@ -251,10 +263,19 @@ impl OpenOptions {
     /// operate relative to d. To open a file with an absolute path, use the
     /// stdlib fs::OpenOptions.
     ///
-    /// Note: On Windows this uses low level APIs that do not perform path
-    /// separator translation: if passing a path containing a separator, it must
-    /// be a platform native one. e.g. `foo\\bar` on Windows, vs `foo/bar` on
-    /// most other OS's.
+    /// Platform specific:
+    ///
+    /// Windows: Backed by
+    /// [NTCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile).
+    /// This function does not perform file name separator translations. If
+    /// passing a path containing a separator, it must be a platform native one.
+    /// e.g. `foo\\bar` on Windows, vs `foo/bar` on most other OS's. This
+    /// function cannot open the parent directory (e.g. open_at(&d, "..")). It
+    /// is possible for callers to determine the [path of a
+    /// handle](https://learn.microsoft.com/en-us/windows/win32/memory/obtaining-a-file-name-from-a-file-handle),
+    /// and then open that using normal stdlib functions.
+    ///
+    /// Unix: Backed by openat(2).
     pub fn open_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
@@ -466,6 +487,11 @@ mod tests {
     // Can be inlined when more_io_errors stablises
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
+
+            use winapi::um::winbase::{ FILE_FLAG_OPEN_REPARSE_POINT};
+
+            use super::win::OpenOptionsExt;
+
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(
             winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}

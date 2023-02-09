@@ -9,7 +9,8 @@ use std::{
     os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
     path::Path,
     ptr::{self, null_mut},
-    slice, sync::atomic::{AtomicBool, Ordering},
+    slice,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use aligned::{Aligned, A8};
@@ -25,8 +26,8 @@ use winapi::{
         minwindef::{LPDWORD, LPVOID, TRUE, ULONG},
         ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
         winerror::{
-            ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
-            ERROR_NO_MORE_FILES, ERROR_ACCESS_DENIED,
+            ERROR_ACCESS_DENIED, ERROR_DIRECTORY, ERROR_INVALID_PARAMETER,
+            ERROR_NOT_A_REPARSE_POINT, ERROR_NO_MORE_FILES,
         },
     },
     um::{
@@ -72,6 +73,8 @@ pub(crate) struct OpenOptionsImpl {
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
+    desired_access: Option<DesiredAccess>,
+    create_options: Option<CreateOptions>,
     //https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#dwFlagsAndAttributes
     file_attributes: ULONG,
     object_attributes: ULONG,
@@ -94,8 +97,10 @@ impl fmt::Debug for OpenOptionsImpl {
     }
 }
 
+#[derive(Clone, Default)]
 struct DesiredAccess(u32);
 struct FileOpenDisposition(u32);
+#[derive(Clone, Default)]
 struct CreateOptions(u32);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -124,8 +129,10 @@ pub(crate) fn make_loop_error() -> io::Error {
 }
 
 // Cache the workaround for https://twitter.com/rbtcollins/status/1617211985384407044
-static PROCMON_WORKAROUND_CHECKED: once_cell::sync::Lazy<AtomicBool> = once_cell::sync::Lazy::new(||false.into());
-static PROCMON_WORKAROUND_VALUE: once_cell::sync::Lazy<AtomicBool> = once_cell::sync::Lazy::new(||false.into());
+static PROCMON_WORKAROUND_CHECKED: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| true.into());
+static PROCMON_WORKAROUND_VALUE: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| true.into());
 const FS_AT_WORKAROUND_PROCMON: &'static str = "FS_AT_WORKAROUND_PROCMON";
 
 impl OpenOptionsImpl {
@@ -204,8 +211,6 @@ impl OpenOptionsImpl {
             0 as PLARGE_INTEGER
         };
 
-        // Do we need FILE_FLAG_OPEN_REPARSE_POINT
-        // handling at this layer? Perhaps users should choose.
         let file_attributes = if self.file_attributes == 0 {
             FILE_ATTRIBUTE_NORMAL
         } else {
@@ -318,7 +323,7 @@ impl OpenOptionsImpl {
     }
 
     pub fn open_at(&self, f: &File, path: &Path) -> Result<File> {
-        let desired_access = self.get_access_mode()?;
+        let desired_access = self.get_open_at_access_mode()?;
         let create_disposition = self.get_file_disposition(false)?;
         // TODO: create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
@@ -328,7 +333,9 @@ impl OpenOptionsImpl {
         // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
         let create_options = CreateOptions(
             FILE_SYNCHRONOUS_IO_NONALERT
-                | if matches!(self.follow, Some(false)) || self.create_new {
+                | if let Some(CreateOptions(custom_options)) = self.create_options {
+                    custom_options
+                } else if matches!(self.follow, Some(false)) || self.create_new {
                     // Follow is disabled, or create_new, which for unix is ==
                     // O_EXCL | O_CREAT and defined as rejecting a symlink at
                     // the target path.
@@ -336,6 +343,13 @@ impl OpenOptionsImpl {
                 } else {
                     0
                 },
+        );
+        #[cfg(feature="log")]
+        log::trace!(
+            "open_at: {}, access: {:#0x?} create_options: {:#0x?}",
+            path.display(),
+            desired_access.0,
+            create_options.0
         );
         let open_symlink = if self.follow.unwrap_or(true) {
             OpenSymLink::OpenLinkFile
@@ -558,16 +572,21 @@ impl OpenOptionsImpl {
             if e.raw_os_error() != Some(ERROR_NOT_A_REPARSE_POINT as i32) {
                 // This is ugly. But procmon seems to interfere.
                 if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
-                    let workaround = if !AtomicBool::load(&PROCMON_WORKAROUND_CHECKED, Ordering::Relaxed) {
-                        use std::env::var;
-                        let workaround = var(FS_AT_WORKAROUND_PROCMON).is_ok();
-                        AtomicBool::store(&PROCMON_WORKAROUND_VALUE,
-                            workaround, Ordering::Relaxed);
+                    // https://twitter.com/rbtcollins/status/1617211985384407044
+                    let workaround =
+                        if !AtomicBool::load(&PROCMON_WORKAROUND_CHECKED, Ordering::Relaxed) {
+                            use std::env::var;
+                            let workaround = var(FS_AT_WORKAROUND_PROCMON).is_ok();
+                            AtomicBool::store(
+                                &PROCMON_WORKAROUND_VALUE,
+                                workaround,
+                                Ordering::Relaxed,
+                            );
                             AtomicBool::store(&PROCMON_WORKAROUND_CHECKED, true, Ordering::Relaxed);
                             workaround
-                    } else {AtomicBool::load(&PROCMON_WORKAROUND_VALUE,
-                            Ordering::Relaxed)
-                    };
+                        } else {
+                            AtomicBool::load(&PROCMON_WORKAROUND_VALUE, Ordering::Relaxed)
+                        };
                     if workaround {
                         // run under procmon this library receives ACCESS_DENIED
                         // on error that would otherwise be
@@ -613,11 +632,15 @@ impl OpenOptionsImpl {
         }
     }
 
-    fn get_access_mode(&self) -> Result<DesiredAccess> {
+    fn get_open_at_access_mode(&self) -> Result<DesiredAccess> {
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
         // requires SYNCHRONIZE on the access mode.
         let mut desired_access = SYNCHRONIZE;
+        if let Some(DesiredAccess(custom_access)) = self.desired_access {
+            return Ok(DesiredAccess(custom_access | desired_access));
+        }
+
         if self.read {
             desired_access |= GENERIC_READ;
         }
@@ -655,6 +678,10 @@ impl OpenOptionsImpl {
     }
 }
 
+/// Extends OpenOptions with Windows specific parameters.
+///
+/// Note that `open_at` uses `NTCreateFile`, not `CreateFile` and as such the
+/// flags and attributes values differ.
 pub trait OpenOptionsExt {
     /**
     Set the AllocationSize parameter to NTCreateFile.
@@ -683,6 +710,68 @@ pub trait OpenOptionsExt {
     ```
     */
     fn allocation_size(&mut self, val: i64) -> &mut Self;
+
+    /**
+    Set the DesiredAccess parameter to NTCreateFile for `open_at()`.
+
+    Mostly overrides the parameter, giving caller control. In order to work with
+    the IO model provided today, SYNCHRONIZE is always included. This is an
+    implementation detail and could change in future.
+
+    ```no_run
+    extern crate winapi;
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_READ_ATTRIBUTES};
+
+    use fs_at::OpenOptions;
+    use fs_at::os::windows::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let mut parent_dir = options.open(".").unwrap();
+
+    let mut options = OpenOptions::default();
+    options.desired_access(FILE_READ_ATTRIBUTES);
+    let child_file = options.open_at(&parent_dir, "child").unwrap();
+    child_file.metadata();
+    ```
+    */
+    fn desired_access(&mut self, desired_access: u32) -> &mut Self;
+
+    /**
+    Set the CreateOptions parameter to NTCreateFile for `open_at()`.
+
+    Mostly overrides the parameter, giving callers detailed control. This causes
+    methods such as `follow` to have no effect.
+
+    In order to work with the IO model provided today, FILE_SYNCHRONOUS_IO_NONALERT
+    is always included. This is an implementation detail and could change in future.
+
+    ```no_run
+    extern crate winapi;
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_READ_ATTRIBUTES};
+    use windows_sys::Win32::System::WindowsProgramming::FILE_NO_EA_KNOWLEDGE;
+
+    use fs_at::OpenOptions;
+    use fs_at::os::windows::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let mut parent_dir = options.open(".").unwrap();
+
+    let mut options = OpenOptions::default();
+    options.create_options(FILE_NO_EA_KNOWLEDGE);
+    let child_file = options.open_at(&parent_dir, "child");
+    ```
+    */
+    fn create_options(&mut self, create_options: u32) -> &mut Self;
 
     /**
     Set the FileAttributes field used with NTCreateFile.
@@ -842,6 +931,16 @@ pub trait OpenOptionsExt {
 impl OpenOptionsExt for OpenOptions {
     fn allocation_size(&mut self, val: i64) -> &mut Self {
         self._impl.allocation_size = val;
+        self
+    }
+
+    fn create_options(&mut self, create_options: u32) -> &mut Self {
+        self._impl.create_options = Some(CreateOptions(create_options));
+        self
+    }
+
+    fn desired_access(&mut self, desired_access: u32) -> &mut Self {
+        self._impl.desired_access = Some(DesiredAccess(desired_access));
         self
     }
 
