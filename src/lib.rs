@@ -33,6 +33,18 @@
 //! directory or truncating a file at both the link target and the link source.
 //!
 //! Truncate+nofollow also varies by platform: See OpenOptions::truncate.
+//!
+//! Caveats:
+//! - On windows, procmon will cause the symlink resolution check to receive an
+//!   incorrect error code. Enabling the workaround-procmon feature and setting
+//!   FS_AT_WORKAROUND_PROCMON will treat ACCESS_DENIED as
+//!   ERROR_NOT_REPARSE_POINT.
+//!   https://twitter.com/rbtcollins/status/1617211985384407044
+//!
+//! Feature flags:
+//! - workaround-procmon: enables the FS_AT_WORKAROUND_PROCMON environment
+//!   variable.
+//! - log: enables trace log messages for debugging
 
 use std::{
     ffi::OsStr,
@@ -60,6 +72,18 @@ cfg_if::cfg_if! {
 /// security descriptors on windows, or mode on unix) using an appropriate
 /// platform specific trait, finishing up with the desired manipulation e.g.
 /// `mkdirat`.
+///
+/// A note on the manipulations: they take a directory handle as &File. This is
+/// believed safe but if you have reason to disagree please file a bug.
+///
+/// - Rust's borrow checker ensures that File::drop() will not be called
+///   concurrently with a manipulation, thus the file will still be open (in the
+///   absence of unsafe Rust or non-Rust libraries)
+/// - the openat family of functions do not document any state changes to the
+///   base fd that names are resolved against. Only `read_dir` is documented as
+///   changing state.
+/// - similarly on Windows, NtCreateFile is not documented as changing any state
+///   when creating a file relative to the handle.
 #[derive(Default, Debug)]
 #[non_exhaustive]
 pub struct OpenOptions {
@@ -228,7 +252,7 @@ impl OpenOptions {
     ///   `openat` syscall to open the created directory. This limitation may be
     ///   lifted in future if the mooted mkdirat2 call gets created.. The mode
     ///   of the new directory defaults to 0o777.
-    pub fn mkdir_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
+    pub fn mkdir_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .mkdir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
@@ -239,11 +263,20 @@ impl OpenOptions {
     /// operate relative to d. To open a file with an absolute path, use the
     /// stdlib fs::OpenOptions.
     ///
-    /// Note: On Windows this uses low level APIs that do not perform path
-    /// separator translation: if passing a path containing a separator, it must
-    /// be a platform native one. e.g. `foo\\bar` on Windows, vs `foo/bar` on
-    /// most other OS's.
-    pub fn open_at<P: AsRef<Path>>(&self, d: &mut File, p: P) -> Result<File> {
+    /// Platform specific:
+    ///
+    /// Windows: Backed by
+    /// [NTCreateFile](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile).
+    /// This function does not perform file name separator translations. If
+    /// passing a path containing a separator, it must be a platform native one.
+    /// e.g. `foo\\bar` on Windows, vs `foo/bar` on most other OS's. This
+    /// function cannot open the parent directory (e.g. open_at(&d, "..")). It
+    /// is possible for callers to determine the [path of a
+    /// handle](https://learn.microsoft.com/en-us/windows/win32/memory/obtaining-a-file-name-from-a-file-handle),
+    /// and then open that using normal stdlib functions.
+    ///
+    /// Unix: Backed by openat(2).
+    pub fn open_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
@@ -277,7 +310,7 @@ impl OpenOptions {
     /// control via an extension trait.
     pub fn symlink_at<P, Q>(
         &self,
-        d: &mut File,
+        d: &File,
         linkname: P,
         entry_type: LinkEntryType,
         target: Q,
@@ -301,7 +334,7 @@ impl OpenOptions {
     /// Platform specific: some platforms treat unlink and rmdir as equivalent.
     /// Others such as Mac OSX do not, and rmdir must be used when deleting a
     /// directory.
-    pub fn unlink_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    pub fn unlink_at<P>(&self, d: &File, p: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
@@ -314,7 +347,7 @@ impl OpenOptions {
     /// Platform specific: some platforms treat unlink and rmdir as equivalent.
     /// Others such as Mac OSX do not, and rmdir must be used when deleting a
     /// directory.
-    pub fn rmdir_at<P>(&self, d: &mut File, p: P) -> Result<()>
+    pub fn rmdir_at<P>(&self, d: &File, p: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
@@ -340,6 +373,21 @@ impl OpenOptions {
 /// To the greatest extent possible the underlying OS semantics are preserved.
 /// That means that `.` and `..` entries are exposed, and that no sort order is
 /// guaranteed by the iterator.
+///
+/// On both unix and Windows directory iteration affects shared mutable state,
+/// thus this iterator holds an &mut File for the lifetime of the iterator. The
+/// workaround - opening a new file - can be performed by users of the library
+/// if desired.
+///
+/// (On Unix fdopendir is used to obtain a directory stream, but as closedir
+/// closes the file descriptor the original descriptor is dup2'd first. But as
+/// dup2 duplicated descriptors share the open file description, the position in
+/// readdir() is shared: permitting other concurrent readdir iterations to be
+/// started concurrently might be memory safe, but its clearly not safe safe.
+///
+/// On Windows a similar situation applies with FileIdBothDirectoryInfo /
+/// FileIdBothDirectoryRestartInfo and DuplicateHandle: DuplicateHandle aliases
+/// into kernel state rather than creating an entirely separate accounting.
 #[derive(Debug)]
 pub struct ReadDir<'a> {
     _impl: ReadDirImpl<'a>,
@@ -431,6 +479,7 @@ mod tests {
     };
 
     use tempfile::TempDir;
+    use test_log::test;
 
     use crate::{
         read_dir, testsupport::open_dir, DirEntry, LinkEntryType, OpenOptions, OpenOptionsWriteMode,
@@ -439,6 +488,7 @@ mod tests {
     // Can be inlined when more_io_errors stablises
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
+
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(
             winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}
@@ -564,7 +614,7 @@ mod tests {
             "testing idx: {counter}, op: {test:?} create_in_advance: {create_in_advance}, err: {err:?}"
         );
         *counter += 1;
-        let (_tmp, mut parent_file, renamed_parent) = setup()?;
+        let (_tmp, parent_file, renamed_parent) = setup()?;
         let mut options = OpenOptions::default();
 
         let (actual_child, child_name) = if test.symlink_mode == SymlinkMode::None {
@@ -596,14 +646,14 @@ mod tests {
         if create_in_advance {
             match test.op {
                 Op::MkDir | Op::RmDir => {
-                    options.mkdir_at(&mut parent_file, actual_child)?;
+                    options.mkdir_at(&parent_file, actual_child)?;
                 }
                 Op::OpenDir => (),
                 Op::OpenFile | Op::Unlink => {
                     let mut first_file = OpenOptions::default()
                         .create(true)
                         .write(OpenOptionsWriteMode::Write)
-                        .open_at(&mut parent_file, actual_child)?;
+                        .open_at(&parent_file, actual_child)?;
                     assert_eq!(16, first_file.write(b"existing content")?);
                     first_file.flush()?;
                 }
@@ -613,7 +663,7 @@ mod tests {
             SymlinkMode::None => {}
             SymlinkMode::LinkIsParent => {
                 OpenOptions::default().create(true).symlink_at(
-                    &mut parent_file,
+                    &parent_file,
                     "link_dir",
                     test.symlink_entry_type,
                     ".",
@@ -621,7 +671,7 @@ mod tests {
             }
             SymlinkMode::LinkIsTarget => {
                 OpenOptions::default().create(true).symlink_at(
-                    &mut parent_file,
+                    &parent_file,
                     &child_name,
                     test.symlink_entry_type,
                     actual_child,
@@ -632,9 +682,9 @@ mod tests {
         if matches!(test.op, Op::MkDir | Op::OpenDir | Op::OpenFile) {
             // functions that return a file handle
             let res = match test.op {
-                Op::MkDir => options.mkdir_at(&mut parent_file, &child_name),
+                Op::MkDir => options.mkdir_at(&parent_file, &child_name),
                 Op::OpenDir => unimplemented!(),
-                Op::OpenFile => options.open_at(&mut parent_file, &child_name),
+                Op::OpenFile => options.open_at(&parent_file, &child_name),
                 _ => unreachable!(),
             };
             let mut child = match (res, err) {
@@ -678,8 +728,8 @@ mod tests {
         } else {
             // Functions that delete something
             let res = match test.op {
-                Op::RmDir => options.rmdir_at(&mut parent_file, &child_name),
-                Op::Unlink => options.unlink_at(&mut parent_file, &child_name),
+                Op::RmDir => options.rmdir_at(&parent_file, &child_name),
+                Op::Unlink => options.unlink_at(&parent_file, &child_name),
                 _ => unreachable!(),
             };
             match (res, err) {
@@ -971,9 +1021,9 @@ mod tests {
 
         let mut options = OpenOptions::default();
         options.create_new(true).write(OpenOptionsWriteMode::Write);
-        options.open_at(&mut parent_dir, "1")?;
-        options.open_at(&mut parent_dir, "2")?;
-        options.open_at(&mut options.mkdir_at(&mut parent_dir, "child")?, "3")?;
+        options.open_at(&parent_dir, "1")?;
+        options.open_at(&parent_dir, "2")?;
+        options.open_at(&options.mkdir_at(&parent_dir, "child")?, "3")?;
         let children = read_dir(&mut parent_dir)?.collect::<Result<Vec<_>>>()?;
         assert_eq!(
             5,
@@ -982,15 +1032,12 @@ mod tests {
         );
         assert!(dir_present(&children, OsStr::new("1")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("2")), "{children:?}");
-        assert!(
-            dir_present(&children, OsStr::new("child")),
-            "{children:?}"
-        );
+        assert!(dir_present(&children, OsStr::new("child")), "{children:?}");
 
         {
             let mut child = OpenOptions::default()
                 .read(true)
-                .open_at(&mut parent_dir, "child")?;
+                .open_at(&parent_dir, "child")?;
             let children = read_dir(&mut child)?.collect::<Result<Vec<_>>>()?;
             assert_eq!(3, children.len(), "{children:?}");
             assert!(dir_present(&children, OsStr::new("3")), "{children:?}");
@@ -1002,13 +1049,13 @@ mod tests {
     fn symlink_at() -> Result<()> {
         let (_tmp, mut parent_dir, _pathname) = setup()?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname1",
             crate::LinkEntryType::Dir,
             "target",
         )?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname2",
             crate::LinkEntryType::File,
             "target",
@@ -1026,22 +1073,22 @@ mod tests {
 
     #[test]
     fn check_eloop_raw_os_value() -> Result<()> {
-        let (_tmp, mut parent_dir, _pathname) = setup()?;
+        let (_tmp, parent_dir, _pathname) = setup()?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname1",
             crate::LinkEntryType::Dir,
             "linkname2",
         )?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname2",
             crate::LinkEntryType::Dir,
             "linkname1",
         )?;
         let e = OpenOptions::default()
             .read(true)
-            .open_at(&mut parent_dir, "linkname1")
+            .open_at(&parent_dir, "linkname1")
             .unwrap_err();
         assert_eq!(e.raw_os_error(), FileSystemLoopError().raw_os_error());
         Ok(())

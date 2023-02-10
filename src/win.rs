@@ -72,6 +72,8 @@ pub(crate) struct OpenOptionsImpl {
     // LARGE_INTEGER defined as signed 64-bit
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-large_integer-r1
     allocation_size: i64,
+    desired_access: Option<DesiredAccess>,
+    create_options: Option<CreateOptions>,
     //https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#dwFlagsAndAttributes
     file_attributes: ULONG,
     object_attributes: ULONG,
@@ -94,8 +96,10 @@ impl fmt::Debug for OpenOptionsImpl {
     }
 }
 
+#[derive(Clone, Default)]
 struct DesiredAccess(u32);
 struct FileOpenDisposition(u32);
+#[derive(Clone, Default)]
 struct CreateOptions(u32);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -121,6 +125,47 @@ fn make_already_exists_error() -> io::Error {
 
 pub(crate) fn make_loop_error() -> io::Error {
     io::Error::from_raw_os_error(winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)
+}
+
+// Cache the workaround for https://twitter.com/rbtcollins/status/1617211985384407044
+#[cfg(feature = "workaround-procmon")]
+mod procmon {
+    use std::{
+        io::Error,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    use winapi::shared::winerror::ERROR_ACCESS_DENIED;
+
+    static WORKAROUND_CHECKED: once_cell::sync::Lazy<AtomicBool> =
+        once_cell::sync::Lazy::new(|| false.into());
+    static WORKAROUND_VALUE: once_cell::sync::Lazy<AtomicBool> =
+        once_cell::sync::Lazy::new(|| false.into());
+    const ENV_VAR_NAME: &str = "FS_AT_WORKAROUND_PROCMON";
+
+    pub(crate) fn workaround<T>(e: Error, ok: T) -> Result<T, Error> {
+        if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+            // https://twitter.com/rbtcollins/status/1617211985384407044
+            let workaround = if !AtomicBool::load(&WORKAROUND_CHECKED, Ordering::Relaxed) {
+                use std::env::var;
+                let workaround = var(ENV_VAR_NAME).is_ok();
+                AtomicBool::store(&WORKAROUND_VALUE, workaround, Ordering::Relaxed);
+                AtomicBool::store(&WORKAROUND_CHECKED, true, Ordering::Relaxed);
+                workaround
+            } else {
+                AtomicBool::load(&WORKAROUND_VALUE, Ordering::Relaxed)
+            };
+            if workaround {
+                // run under procmon this library receives ACCESS_DENIED on some
+                // DeviceIOControl calls :- but they seem to still take effect
+                // for write calls, and succeed for reading links when an actual
+                // link is present. e.g. ERROR_NOT_A_REPARSE_POINT. this
+                // could mask other errors too but this code path is opt-in.
+                return Ok(ok);
+            }
+        }
+        Err(e)
+    }
 }
 
 impl OpenOptionsImpl {
@@ -153,7 +198,7 @@ impl OpenOptionsImpl {
     #[allow(clippy::too_many_arguments)]
     fn do_create_file<MLE>(
         &self,
-        f: &mut File,
+        f: &File,
         path: &Path,
         desired_access: DesiredAccess,
         create_disposition: FileOpenDisposition,
@@ -199,8 +244,6 @@ impl OpenOptionsImpl {
             0 as PLARGE_INTEGER
         };
 
-        // Do we need FILE_FLAG_OPEN_REPARSE_POINT
-        // handling at this layer? Perhaps users should choose.
         let file_attributes = if self.file_attributes == 0 {
             FILE_ATTRIBUTE_NORMAL
         } else {
@@ -273,7 +316,7 @@ impl OpenOptionsImpl {
         }
     }
 
-    pub fn mkdir_at(&self, f: &mut File, path: &Path) -> Result<File> {
+    pub fn mkdir_at(&self, f: &File, path: &Path) -> Result<File> {
         // get_access_mode must not be used for opening a directory
         // ... see docs or we must have file use the Ext trait always.
         let desired_access =
@@ -312,8 +355,8 @@ impl OpenOptionsImpl {
         })
     }
 
-    pub fn open_at(&self, f: &mut File, path: &Path) -> Result<File> {
-        let desired_access = self.get_access_mode()?;
+    pub fn open_at(&self, f: &File, path: &Path) -> Result<File> {
+        let desired_access = self.get_open_at_access_mode()?;
         let create_disposition = self.get_file_disposition(false)?;
         // TODO: create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
@@ -323,7 +366,9 @@ impl OpenOptionsImpl {
         // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
         let create_options = CreateOptions(
             FILE_SYNCHRONOUS_IO_NONALERT
-                | if matches!(self.follow, Some(false)) || self.create_new {
+                | if let Some(CreateOptions(custom_options)) = self.create_options {
+                    custom_options
+                } else if matches!(self.follow, Some(false)) || self.create_new {
                     // Follow is disabled, or create_new, which for unix is ==
                     // O_EXCL | O_CREAT and defined as rejecting a symlink at
                     // the target path.
@@ -331,6 +376,13 @@ impl OpenOptionsImpl {
                 } else {
                     0
                 },
+        );
+        #[cfg(feature = "log")]
+        log::trace!(
+            "open_at: {}, access: {:#0x?} create_options: {:#0x?}",
+            path.display(),
+            desired_access.0,
+            create_options.0
         );
         let open_symlink = if self.follow.unwrap_or(true) {
             OpenSymLink::OpenLinkFile
@@ -363,7 +415,7 @@ impl OpenOptionsImpl {
 
     pub fn symlink_at(
         &self,
-        d: &mut File,
+        d: &File,
         linkname: &Path,
         link_entry_type: LinkEntryType,
         target: &Path,
@@ -484,24 +536,23 @@ impl OpenOptionsImpl {
                 NULL as LPOVERLAPPED,
             )
         };
-        cvt::cvt(bool_result).map(|_v| ())
+        let r = cvt::cvt(bool_result).map(|_v| ());
+        #[cfg(feature = "workaround-procmon")]
+        return r.or_else(|e| procmon::workaround(e, ()));
+        #[cfg(not(feature = "workaround-procmon"))]
+        return r;
     }
 
-    pub fn rmdir_at(&self, f: &mut File, p: &Path) -> Result<()> {
+    pub fn rmdir_at(&self, f: &File, p: &Path) -> Result<()> {
         // we must open a directory
         self.mark_for_deletion(f, p, CreateOptions(FILE_DIRECTORY_FILE))
     }
 
-    pub fn unlink_at(&self, f: &mut File, p: &Path) -> Result<()> {
+    pub fn unlink_at(&self, f: &File, p: &Path) -> Result<()> {
         self.mark_for_deletion(f, p, CreateOptions(0))
     }
 
-    fn mark_for_deletion(
-        &self,
-        f: &mut File,
-        p: &Path,
-        create_options: CreateOptions,
-    ) -> Result<()> {
+    fn mark_for_deletion(&self, f: &File, p: &Path, create_options: CreateOptions) -> Result<()> {
         let desired_access = DesiredAccess(DELETE);
         let create_disposition = FileOpenDisposition(FILE_OPEN);
         // Only delete what was named :- do not do link processing
@@ -556,6 +607,10 @@ impl OpenOptionsImpl {
         let result = cvt::cvt(bool_result);
         if let Err(e) = result {
             if e.raw_os_error() != Some(ERROR_NOT_A_REPARSE_POINT as i32) {
+                // This is ugly. But procmon seems to interfere.
+                #[cfg(feature = "workaround-procmon")]
+                return procmon::workaround(e, false);
+                #[cfg(not(feature = "workaround-procmon"))]
                 return Err(e);
             }
             return Ok(false);
@@ -593,11 +648,15 @@ impl OpenOptionsImpl {
         }
     }
 
-    fn get_access_mode(&self) -> Result<DesiredAccess> {
+    fn get_open_at_access_mode(&self) -> Result<DesiredAccess> {
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
         // Rust itself uses - this lets the OS position tracker work. It also
         // requires SYNCHRONIZE on the access mode.
         let mut desired_access = SYNCHRONIZE;
+        if let Some(DesiredAccess(custom_access)) = self.desired_access {
+            return Ok(DesiredAccess(custom_access | desired_access));
+        }
+
         if self.read {
             desired_access |= GENERIC_READ;
         }
@@ -635,6 +694,10 @@ impl OpenOptionsImpl {
     }
 }
 
+/// Extends OpenOptions with Windows specific parameters.
+///
+/// Note that `open_at` uses `NTCreateFile`, not `CreateFile` and as such the
+/// flags and attributes values differ.
 pub trait OpenOptionsExt {
     /**
     Set the AllocationSize parameter to NTCreateFile.
@@ -663,6 +726,68 @@ pub trait OpenOptionsExt {
     ```
     */
     fn allocation_size(&mut self, val: i64) -> &mut Self;
+
+    /**
+    Set the DesiredAccess parameter to NTCreateFile for `open_at()`.
+
+    Mostly overrides the parameter, giving caller control. In order to work with
+    the IO model provided today, SYNCHRONIZE is always included. This is an
+    implementation detail and could change in future.
+
+    ```no_run
+    extern crate winapi;
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_READ_ATTRIBUTES};
+
+    use fs_at::OpenOptions;
+    use fs_at::os::windows::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let mut parent_dir = options.open(".").unwrap();
+
+    let mut options = OpenOptions::default();
+    options.desired_access(FILE_READ_ATTRIBUTES);
+    let child_file = options.open_at(&parent_dir, "child").unwrap();
+    child_file.metadata();
+    ```
+    */
+    fn desired_access(&mut self, desired_access: u32) -> &mut Self;
+
+    /**
+    Set the CreateOptions parameter to NTCreateFile for `open_at()`.
+
+    Mostly overrides the parameter, giving callers detailed control. This causes
+    methods such as `follow` to have no effect.
+
+    In order to work with the IO model provided today, FILE_SYNCHRONOUS_IO_NONALERT
+    is always included. This is an implementation detail and could change in future.
+
+    ```no_run
+    extern crate winapi;
+    use std::fs;
+    use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_READ_ATTRIBUTES};
+    use windows_sys::Win32::System::WindowsProgramming::FILE_NO_EA_KNOWLEDGE;
+
+    use fs_at::OpenOptions;
+    use fs_at::os::windows::OpenOptionsExt;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    let mut parent_dir = options.open(".").unwrap();
+
+    let mut options = OpenOptions::default();
+    options.create_options(FILE_NO_EA_KNOWLEDGE);
+    let child_file = options.open_at(&parent_dir, "child");
+    ```
+    */
+    fn create_options(&mut self, create_options: u32) -> &mut Self;
 
     /**
     Set the FileAttributes field used with NTCreateFile.
@@ -825,6 +950,16 @@ impl OpenOptionsExt for OpenOptions {
         self
     }
 
+    fn create_options(&mut self, create_options: u32) -> &mut Self {
+        self._impl.create_options = Some(CreateOptions(create_options));
+        self
+    }
+
+    fn desired_access(&mut self, desired_access: u32) -> &mut Self {
+        self._impl.desired_access = Some(DesiredAccess(desired_access));
+        self
+    }
+
     fn file_attributes(&mut self, val: ULONG) -> &mut Self {
         self._impl.file_attributes = val;
         self
@@ -975,6 +1110,7 @@ mod tests {
     use std::{fs::rename, io::Result};
 
     use tempfile::TempDir;
+    use test_log::test;
     use winapi::shared::ntdef::OBJ_CASE_INSENSITIVE;
 
     use crate::{os::windows::OpenOptionsExt, testsupport::open_dir, OpenOptions};
@@ -989,14 +1125,14 @@ mod tests {
         let parent = tmp.path().join("parent");
         let renamed_parent = tmp.path().join("renamed-parent");
         std::fs::create_dir(&parent)?;
-        let mut parent_file = open_dir(&parent)?;
+        let parent_file = open_dir(&parent)?;
         rename(parent, renamed_parent)?;
         let mut create_opt = OpenOptions::default();
         create_opt.create(true);
-        create_opt.mkdir_at(&mut parent_file, "child")?;
+        create_opt.mkdir_at(&parent_file, "child")?;
         create_opt.object_attributes(OBJ_CASE_INSENSITIVE);
         // Incorrectly passes because we're just using .create() now
-        create_opt.mkdir_at(&mut parent_file, "Child")?;
+        create_opt.mkdir_at(&parent_file, "Child")?;
         Ok(())
     }
 }

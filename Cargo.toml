@@ -12,12 +12,20 @@ version = "0.0.5"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+log = ["dep:log"]
+"workaround-procmon" = ["dep:once_cell"]
+
 [dependencies]
 cfg-if = "1.0.0"
 cvt = "0.1.1"
+env_logger = "0.10.0"
+log = { version = "0.4.17", optional = true }
 
 [dev-dependencies]
 tempfile = "3.3.0"
+test-log = "0.2.11"
 
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2.137"
@@ -26,10 +34,10 @@ libc = "0.2.137"
 # later.
 nix = { version = "0.26.0", default-features = false, features = ["dir"] }
 
-
 [target.'cfg(windows)'.dependencies]
 aligned = "0.4.1"
 ntapi = "0.4.0"
+once_cell = { optional = true, version = "1.17.0" }
 winapi = { version = "0.3", features = [
     "ntdef",
     "minwindef",
@@ -39,3 +47,14 @@ winapi = { version = "0.3", features = [
     "winbase",
     "winuser",
 ] }
+
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+]
+version = "0.45.0"
