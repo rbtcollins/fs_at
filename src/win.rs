@@ -451,18 +451,6 @@ impl OpenOptionsImpl {
             create_options,
             open_symlink,
         )
-        .map_err(|e| {
-            // if e.raw_os_error() == Some(ERROR_DIRECTORY as i32) {
-            //     // NotADirectory happens when opening with FILE_OVERWRITE_IF
-            //     // (e.g. truncate) a Symlink with link-type Dir and follow enabled. But
-            //     // AlreadyExists is a better error consistent with Unix : the
-            //     // NotADirectory error is leakage from the implementation of
-            //     // symlinks on Windows. Here we need to retry
-            //     io::Error::new(ErrorKind::AlreadyExists, e)
-            // } else {
-            e
-            // }
-        })
     }
 
     pub fn symlink_at(
