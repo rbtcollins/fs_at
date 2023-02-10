@@ -281,6 +281,28 @@ impl OpenOptions {
             .open_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
 
+    /// Opens a directory.
+    ///
+    /// This is a thin layer over [open_at] which handles the platform specific
+    /// variation involved in opening a directory. Follow handling is
+    /// automatically disabled.
+    ///
+    /// As with [open_at], extension methods can be used to override the
+    /// underlying behaviour.
+    ///
+    /// Platform specific:
+    ///
+    /// Windows: sets FILE_FLAG_OPEN_REPARSE_POINT for createOptions, and for
+    /// dwAccessFlag adds in FILE_LIST_DIRECTORY and FILE_TRAVERSE. Further,
+    /// read and write requests are translated to FILE_READ_ATTRIBUTES, and
+    /// FILE_WRITE_ATTRIBUTES|DELETE respectively.
+    ///
+    /// Unix: sets O_NOFOLLOW
+    pub fn open_dir_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
+        self._impl
+            .open_dir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
+    }
+
     /// Creates a symlink at the path linkname pointing to target.
     ///
     /// This will fail if the path linkname is already used.
@@ -476,6 +498,7 @@ mod tests {
         fs::{rename, File},
         io::{Error, ErrorKind, Result, Seek, SeekFrom, Write},
         path::PathBuf,
+        time::{Duration, SystemTime},
     };
 
     use tempfile::TempDir;
@@ -1068,6 +1091,57 @@ mod tests {
         );
         assert!(children.iter().any(|e| e.name() == "linkname1"));
         assert!(children.iter().any(|e| e.name() == "linkname2"));
+        Ok(())
+    }
+
+    #[test]
+    fn open_dir_at() -> Result<()> {
+        let (_tmp, parent_dir, _pathname) = setup()?;
+        // setup
+        {
+            let dir = OpenOptions::default().mkdir_at(&parent_dir, "dir")?;
+            OpenOptions::default()
+                .create_new(true)
+                .write(OpenOptionsWriteMode::Write)
+                .open_at(&dir, "file")?;
+        }
+
+        // case 1: no options -> error
+        {
+            OpenOptions::default()
+                .open_dir_at(&parent_dir, "dir")
+                .unwrap_err();
+        }
+
+        // case 2: write - can we write the dir's date
+        let reference_time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        {
+            let dir = OpenOptions::default()
+                .write(OpenOptionsWriteMode::Write)
+                .open_dir_at(&parent_dir, "dir")?;
+                fs_set_times::SetTimes::set_times(&dir, None, Some(fs_set_times::SystemTimeSpec::Absolute(reference_time)))?;
+        }
+
+        // case 3: read - can we read the dir's date
+        {
+            let dir = OpenOptions::default()
+                .read(true)
+                .open_dir_at(&parent_dir, "dir")?;
+            assert_eq!(reference_time, dir.metadata()?.modified()?);
+        }
+
+        // case 4: can we traverse the directory
+        {
+            let mut dir = OpenOptions::default()
+                .read(true)
+                .open_dir_at(&parent_dir, "dir")?;
+             OpenOptions::default().read(true).open_at(&dir, "file")?;
+            let children = super::read_dir(&mut dir)?
+                .map(|dir_entry| dir_entry.unwrap().name().to_owned())
+                .collect::<Vec<_>>();
+        assert_eq!(3, children.len());
+        }
+
         Ok(())
     }
 
