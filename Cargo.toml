@@ -29,7 +29,7 @@ test-log = "0.2.11"
 fs-set-times = "0.18.1"
 
 [target.'cfg(not(windows))'.dependencies]
-libc = "0.2.137"
+libc = "0.2.139"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more : consider it weak and something we can remove if expedient
 # later.
