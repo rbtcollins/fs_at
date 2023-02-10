@@ -50,6 +50,7 @@ use winapi::{
 };
 
 use sugar::{NTStatusError, OSUnicodeString};
+use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
 
 use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
@@ -363,7 +364,7 @@ impl OpenOptionsImpl {
         // Rust itself uses - this lets the OS position tracker work. It also
         // requires SYNCHRONIZE on the access mode. We should permit users to
         // expect particular types, but until we make that explicit, we need to
-        // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
+        // open any kind of file when requested
         let create_options = CreateOptions(
             FILE_SYNCHRONOUS_IO_NONALERT
                 | if let Some(CreateOptions(custom_options)) = self.create_options {
@@ -411,6 +412,45 @@ impl OpenOptionsImpl {
                 e
             }
         })
+    }
+
+    pub fn open_dir_at(&self, f: &File, path: &Path) -> Result<File> {
+        let desired_access = self.get_open_dir_at_access_mode()?;
+        let create_disposition = self.get_file_disposition(false)?;
+        // TODO: create options needs to be controlled through OpenOptions too.
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode. We should permit users to
+        // expect particular types, but until we make that explicit, we need to
+        // open any kind of file when requested # FILE_NON_DIRECTORY_FILE |
+        let create_options = CreateOptions(
+            FILE_SYNCHRONOUS_IO_NONALERT
+                | if let Some(CreateOptions(custom_options)) = self.create_options {
+                    custom_options
+                } else {
+                    FILE_OPEN_REPARSE_POINT
+                },
+        );
+        #[cfg(feature = "log")]
+        log::trace!(
+            "open_dir_at: {}, access: {:#0x?} create_options: {:#0x?}",
+            path.display(),
+            desired_access.0,
+            create_options.0
+        );
+        let open_symlink = {
+            // Be compatible with Unix code - O_NOFOLLOW without O_PATH generates ELOOP.
+            OpenSymLink::RaiseError(make_loop_error)
+        };
+
+        self.do_create_file(
+            f,
+            path,
+            desired_access,
+            create_disposition,
+            create_options,
+            open_symlink,
+        )
     }
 
     pub fn symlink_at(
@@ -666,6 +706,34 @@ impl OpenOptionsImpl {
             (.., Some(mode)) => mode,
             (OpenOptionsWriteMode::Write, None) => GENERIC_WRITE,
             (OpenOptionsWriteMode::Append, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
+            _ => 0,
+        };
+
+        if desired_access == SYNCHRONIZE {
+            // neither read nor write modes selected
+            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
+        }
+        Ok(DesiredAccess(desired_access))
+    }
+
+    fn get_open_dir_at_access_mode(&self) -> Result<DesiredAccess> {
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        let mut desired_access = SYNCHRONIZE;
+        if let Some(DesiredAccess(custom_access)) = self.desired_access {
+            return Ok(DesiredAccess(custom_access | desired_access));
+        }
+
+        if self.read {
+            desired_access |= FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY | FILE_TRAVERSE;
+        }
+
+        // rust has match (self.read, self.write, self.append, self.access_mode) {
+        desired_access |= match (self.write, None) {
+            (.., Some(mode)) => mode,
+            (OpenOptionsWriteMode::Write, None) => FILE_WRITE_ATTRIBUTES | DELETE,
+            (OpenOptionsWriteMode::Append, None) => FILE_WRITE_ATTRIBUTES | DELETE,
             _ => 0,
         };
 

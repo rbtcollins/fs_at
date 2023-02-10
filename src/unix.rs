@@ -112,9 +112,21 @@ impl OpenOptionsImpl {
     }
 
     pub fn open_at(&self, d: &File, path: &Path) -> Result<File> {
+        let flags = self.get_flags()?;
+        self._open_at(d, path, flags)
+    }
+
+    pub fn open_dir_at(&self, d: &File, path: &Path) -> Result<File> {
+        if matches!((self.read, self.write), (false, OpenOptionsWriteMode::None)) {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY;
+        self._open_at(d, path, flags)
+    }
+
+    fn _open_at(&self, d: &File, path: &Path, flags: i32) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
-        let flags = self.get_flags()?;
 
         // TODO
         // Consider using openat2 on Linux... though that requires direct

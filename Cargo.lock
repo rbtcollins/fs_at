@@ -106,6 +106,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-set-times"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "857cf27edcb26c2a36d84b2954019573d335bb289876113aceacacdca47a4fd4"
+dependencies = [
+ "io-lifetimes",
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
 name = "fs_at"
 version = "0.0.5"
 dependencies = [
@@ -113,6 +124,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "cvt",
  "env_logger",
+ "fs-set-times",
  "libc",
  "log",
  "nix",
