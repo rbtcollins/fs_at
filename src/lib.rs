@@ -1119,7 +1119,11 @@ mod tests {
             let dir = OpenOptions::default()
                 .write(OpenOptionsWriteMode::Write)
                 .open_dir_at(&parent_dir, "dir")?;
-                fs_set_times::SetTimes::set_times(&dir, None, Some(fs_set_times::SystemTimeSpec::Absolute(reference_time)))?;
+            fs_set_times::SetTimes::set_times(
+                &dir,
+                None,
+                Some(fs_set_times::SystemTimeSpec::Absolute(reference_time)),
+            )?;
         }
 
         // case 3: read - can we read the dir's date
@@ -1135,11 +1139,11 @@ mod tests {
             let mut dir = OpenOptions::default()
                 .read(true)
                 .open_dir_at(&parent_dir, "dir")?;
-             OpenOptions::default().read(true).open_at(&dir, "file")?;
+            OpenOptions::default().read(true).open_at(&dir, "file")?;
             let children = super::read_dir(&mut dir)?
                 .map(|dir_entry| dir_entry.unwrap().name().to_owned())
                 .collect::<Vec<_>>();
-        assert_eq!(3, children.len());
+            assert_eq!(3, children.len());
         }
 
         Ok(())
