@@ -614,7 +614,7 @@ mod tests {
             "testing idx: {counter}, op: {test:?} create_in_advance: {create_in_advance}, err: {err:?}"
         );
         *counter += 1;
-        let (_tmp, mut parent_file, renamed_parent) = setup()?;
+        let (_tmp, parent_file, renamed_parent) = setup()?;
         let mut options = OpenOptions::default();
 
         let (actual_child, child_name) = if test.symlink_mode == SymlinkMode::None {
@@ -646,14 +646,14 @@ mod tests {
         if create_in_advance {
             match test.op {
                 Op::MkDir | Op::RmDir => {
-                    options.mkdir_at(&mut parent_file, actual_child)?;
+                    options.mkdir_at(&parent_file, actual_child)?;
                 }
                 Op::OpenDir => (),
                 Op::OpenFile | Op::Unlink => {
                     let mut first_file = OpenOptions::default()
                         .create(true)
                         .write(OpenOptionsWriteMode::Write)
-                        .open_at(&mut parent_file, actual_child)?;
+                        .open_at(&parent_file, actual_child)?;
                     assert_eq!(16, first_file.write(b"existing content")?);
                     first_file.flush()?;
                 }
@@ -663,7 +663,7 @@ mod tests {
             SymlinkMode::None => {}
             SymlinkMode::LinkIsParent => {
                 OpenOptions::default().create(true).symlink_at(
-                    &mut parent_file,
+                    &parent_file,
                     "link_dir",
                     test.symlink_entry_type,
                     ".",
@@ -671,7 +671,7 @@ mod tests {
             }
             SymlinkMode::LinkIsTarget => {
                 OpenOptions::default().create(true).symlink_at(
-                    &mut parent_file,
+                    &parent_file,
                     &child_name,
                     test.symlink_entry_type,
                     actual_child,
@@ -682,9 +682,9 @@ mod tests {
         if matches!(test.op, Op::MkDir | Op::OpenDir | Op::OpenFile) {
             // functions that return a file handle
             let res = match test.op {
-                Op::MkDir => options.mkdir_at(&mut parent_file, &child_name),
+                Op::MkDir => options.mkdir_at(&parent_file, &child_name),
                 Op::OpenDir => unimplemented!(),
-                Op::OpenFile => options.open_at(&mut parent_file, &child_name),
+                Op::OpenFile => options.open_at(&parent_file, &child_name),
                 _ => unreachable!(),
             };
             let mut child = match (res, err) {
@@ -728,8 +728,8 @@ mod tests {
         } else {
             // Functions that delete something
             let res = match test.op {
-                Op::RmDir => options.rmdir_at(&mut parent_file, &child_name),
-                Op::Unlink => options.unlink_at(&mut parent_file, &child_name),
+                Op::RmDir => options.rmdir_at(&parent_file, &child_name),
+                Op::Unlink => options.unlink_at(&parent_file, &child_name),
                 _ => unreachable!(),
             };
             match (res, err) {
@@ -1021,9 +1021,9 @@ mod tests {
 
         let mut options = OpenOptions::default();
         options.create_new(true).write(OpenOptionsWriteMode::Write);
-        options.open_at(&mut parent_dir, "1")?;
-        options.open_at(&mut parent_dir, "2")?;
-        options.open_at(&mut options.mkdir_at(&mut parent_dir, "child")?, "3")?;
+        options.open_at(&parent_dir, "1")?;
+        options.open_at(&parent_dir, "2")?;
+        options.open_at(&options.mkdir_at(&parent_dir, "child")?, "3")?;
         let children = read_dir(&mut parent_dir)?.collect::<Result<Vec<_>>>()?;
         assert_eq!(
             5,
@@ -1037,7 +1037,7 @@ mod tests {
         {
             let mut child = OpenOptions::default()
                 .read(true)
-                .open_at(&mut parent_dir, "child")?;
+                .open_at(&parent_dir, "child")?;
             let children = read_dir(&mut child)?.collect::<Result<Vec<_>>>()?;
             assert_eq!(3, children.len(), "{children:?}");
             assert!(dir_present(&children, OsStr::new("3")), "{children:?}");
@@ -1049,13 +1049,13 @@ mod tests {
     fn symlink_at() -> Result<()> {
         let (_tmp, mut parent_dir, _pathname) = setup()?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname1",
             crate::LinkEntryType::Dir,
             "target",
         )?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname2",
             crate::LinkEntryType::File,
             "target",
@@ -1073,22 +1073,22 @@ mod tests {
 
     #[test]
     fn check_eloop_raw_os_value() -> Result<()> {
-        let (_tmp, mut parent_dir, _pathname) = setup()?;
+        let (_tmp, parent_dir, _pathname) = setup()?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname1",
             crate::LinkEntryType::Dir,
             "linkname2",
         )?;
         OpenOptions::default().symlink_at(
-            &mut parent_dir,
+            &parent_dir,
             "linkname2",
             crate::LinkEntryType::Dir,
             "linkname1",
         )?;
         let e = OpenOptions::default()
             .read(true)
-            .open_at(&mut parent_dir, "linkname1")
+            .open_at(&parent_dir, "linkname1")
             .unwrap_err();
         assert_eq!(e.raw_os_error(), FileSystemLoopError().raw_os_error());
         Ok(())

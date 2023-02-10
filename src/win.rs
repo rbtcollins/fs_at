@@ -536,11 +536,10 @@ impl OpenOptionsImpl {
                 NULL as LPOVERLAPPED,
             )
         };
-        let r = cvt::cvt(bool_result)
-            .map(|_v| ());
-        #[cfg(feature="workaround-procmon")]
+        let r = cvt::cvt(bool_result).map(|_v| ());
+        #[cfg(feature = "workaround-procmon")]
         return r.or_else(|e| procmon::workaround(e, ()));
-        #[cfg(not(feature="workaround-procmon"))]
+        #[cfg(not(feature = "workaround-procmon"))]
         return r;
     }
 

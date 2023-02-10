@@ -111,7 +111,7 @@ impl OpenOptionsImpl {
         Ok(data_flags | create_flags | common_flags | no_follow_flag)
     }
 
-    pub fn open_at(&self, d: &mut File, path: &Path) -> Result<File> {
+    pub fn open_at(&self, d: &File, path: &Path) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
         let flags = self.get_flags()?;
@@ -132,7 +132,7 @@ impl OpenOptionsImpl {
     /// sets have been proposed. The second wart is that a non-O_EXCL mode
     /// doesn't exist: mkdir_at() fails if the target exists and is a dir
     /// already.
-    pub fn mkdir_at(&self, d: &mut File, path: &Path) -> Result<File> {
+    pub fn mkdir_at(&self, d: &File, path: &Path) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
         let mut mkdir_e = None;
@@ -174,7 +174,7 @@ impl OpenOptionsImpl {
 
     pub fn symlink_at(
         &self,
-        d: &mut File,
+        d: &File,
         linkname: &Path,
         _entry_type: LinkEntryType,
         target: &Path,
@@ -185,15 +185,15 @@ impl OpenOptionsImpl {
             .map(|_| ())
     }
 
-    pub fn rmdir_at(&self, d: &mut File, p: &Path) -> Result<()> {
+    pub fn rmdir_at(&self, d: &File, p: &Path) -> Result<()> {
         self.unlinkat(d, p, libc::AT_REMOVEDIR)
     }
 
-    pub fn unlink_at(&self, d: &mut File, p: &Path) -> Result<()> {
+    pub fn unlink_at(&self, d: &File, p: &Path) -> Result<()> {
         self.unlinkat(d, p, 0)
     }
 
-    fn unlinkat(&self, d: &mut File, p: &Path, flags: c_int) -> Result<()> {
+    fn unlinkat(&self, d: &File, p: &Path, flags: c_int) -> Result<()> {
         let path = p.as_cstring()?;
         cvt_r(|| unsafe { libc::unlinkat(d.as_raw_fd(), path.as_ptr(), flags) }).map(|_| ())
     }
@@ -353,11 +353,11 @@ mod tests {
         let parent = tmp.path().join("parent");
         let renamed_parent = tmp.path().join("renamed-parent");
         std::fs::create_dir(&parent)?;
-        let mut parent_file = open_dir(&parent)?;
+        let parent_file = open_dir(&parent)?;
         rename(parent, &renamed_parent)?;
         let mut create_opt = OpenOptions::default();
         create_opt.mode(0o700);
-        let child: File = create_opt.mkdir_at(&mut parent_file, "child")?;
+        let child: File = create_opt.mkdir_at(&parent_file, "child")?;
         let expected = renamed_parent.join("child");
         let metadata = expected.symlink_metadata()?;
         assert!(metadata.is_dir());
