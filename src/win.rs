@@ -1125,14 +1125,14 @@ mod tests {
         let parent = tmp.path().join("parent");
         let renamed_parent = tmp.path().join("renamed-parent");
         std::fs::create_dir(&parent)?;
-        let mut parent_file = open_dir(&parent)?;
+        let parent_file = open_dir(&parent)?;
         rename(parent, renamed_parent)?;
         let mut create_opt = OpenOptions::default();
         create_opt.create(true);
-        create_opt.mkdir_at(&mut parent_file, "child")?;
+        create_opt.mkdir_at(&parent_file, "child")?;
         create_opt.object_attributes(OBJ_CASE_INSENSITIVE);
         // Incorrectly passes because we're just using .create() now
-        create_opt.mkdir_at(&mut parent_file, "Child")?;
+        create_opt.mkdir_at(&parent_file, "Child")?;
         Ok(())
     }
 }
