@@ -1140,10 +1140,9 @@ mod tests {
                 .read(true)
                 .open_dir_at(&parent_dir, "dir")?;
             OpenOptions::default().read(true).open_at(&dir, "file")?;
-            let children = super::read_dir(&mut dir)?
-                .map(|dir_entry| dir_entry.unwrap().name().to_owned())
-                .collect::<Vec<_>>();
-            assert_eq!(3, children.len());
+            let children =
+                super::read_dir(&mut dir)?.map(|dir_entry| dir_entry.unwrap().name().to_owned());
+            assert_eq!(3, children.count());
         }
 
         Ok(())
