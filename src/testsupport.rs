@@ -4,12 +4,13 @@ use std::{
     path::Path,
 };
 
+
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
         pub fn open_dir(p:&Path) -> Result<File> {
             use std::os::windows::fs::OpenOptionsExt;
 
-            use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
             let mut options = OpenOptions::new();
             options.read(true);

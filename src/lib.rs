@@ -511,13 +511,14 @@ mod tests {
     // Can be inlined when more_io_errors stablises
     cfg_if::cfg_if! {
         if #[cfg(windows)] {
+            use windows_sys::Win32::Foundation::{ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY};
 
             #[allow(non_snake_case)]
             fn FileSystemLoopError() -> Error { Error::from_raw_os_error(
-            winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)}
+            ERROR_CANT_RESOLVE_FILENAME as i32)}
             #[allow(non_snake_case)]
             fn NotADirectory() -> Error { Error::from_raw_os_error(
-                winapi::shared::winerror::ERROR_DIRECTORY as i32
+                ERROR_DIRECTORY as i32
             )}
         } else {
             #[allow(non_snake_case)]

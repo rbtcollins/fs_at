@@ -48,6 +48,15 @@ winapi = { version = "0.3", features = [
     "winbase",
     "winuser",
 ] }
+smart-default="0.6.0"
+
+# [target.'cfg(windows)'.dependencies.windows-sys]
+# features = [
+#     "Win32_System_IO",
+#     "Win32_System_Ioctl",
+#     "Win32_System_Threading",
+# ]
+# version = "0.45.0"
 
 
 [target.'cfg(windows)'.dependencies.windows-sys]
@@ -57,5 +66,7 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_Security",
+    "Win32_System_Kernel"
 ]
 version = "0.45.0"
