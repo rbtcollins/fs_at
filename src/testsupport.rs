@@ -4,7 +4,6 @@ use std::{
     path::Path,
 };
 
-
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
         pub fn open_dir(p:&Path) -> Result<File> {

@@ -12,7 +12,6 @@ use std::{
     slice,
 };
 
-
 use aligned::{Aligned, A8};
 use ntapi::ntioapi::{
     REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, FILE_CREATE, FILE_CREATED,
@@ -20,32 +19,24 @@ use ntapi::ntioapi::{
     FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
     FILE_SYNCHRONOUS_IO_NONALERT, REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
 };
-use winapi::{
-    shared::{
-        minwindef::{LPDWORD, LPVOID, TRUE},
-        ntdef::{NULL, OBJ_CASE_INSENSITIVE, PVOID},
-        winerror::{
-            ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
-            ERROR_NO_MORE_FILES,
-        },
-    },
-    um::{
-        fileapi::{
-             FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO},
-        winioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
-        winnt::{
-            //  FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-            // FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-            // FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE,
-            IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-            PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE, SECURITY_DESCRIPTOR,
-            SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
-        },
-    },
-};
+use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
 
 use sugar::{NTStatusError, OSUnicodeString};
-use windows_sys::Win32::{Storage::FileSystem::{FILE_READ_ATTRIBUTES, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, FILE_LIST_DIRECTORY, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_GENERIC_WRITE, NtCreateFile, SetFileInformationByHandle, FileDispositionInfo, GetFileInformationByHandleEx, FILE_INFO_BY_HANDLE_CLASS, FileIdBothDirectoryInfo,FileIdBothDirectoryRestartInfo}, Foundation::{ERROR_CANT_RESOLVE_FILENAME, HANDLE}, System::{SystemServices::{GENERIC_READ, GENERIC_WRITE}, WindowsProgramming::OBJECT_ATTRIBUTES, IO::{DeviceIoControl, OVERLAPPED}}};
+use windows_sys::Win32::{
+    Foundation::{ERROR_CANT_RESOLVE_FILENAME, HANDLE, TRUE, ERROR_DIRECTORY, ERROR_NOT_A_REPARSE_POINT, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
+    Storage::FileSystem::{
+        FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx, NtCreateFile, SetFileInformationByHandle, DELETE,
+        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO, SYNCHRONIZE, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    },
+    System::{
+        SystemServices::{GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT},
+        WindowsProgramming::OBJECT_ATTRIBUTES,
+        IO::DeviceIoControl, Kernel::OBJ_CASE_INSENSITIVE, Ioctl::{FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT},
+    }, Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
+};
 
 use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
@@ -53,7 +44,7 @@ pub mod exports {
     pub use super::OpenOptionsExt;
     #[doc(no_inline)]
     pub use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
-    
+
     #[doc(no_inline)]
     pub use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 }
@@ -217,19 +208,19 @@ impl OpenOptionsImpl {
         // should be permitted through? Everything?
         // https://docs.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
         // only specifies OBJ_CASE_INSENSITIVE
-        object_attributes.Attributes = self.object_attributes & OBJ_CASE_INSENSITIVE;
+        object_attributes.Attributes = self.object_attributes & OBJ_CASE_INSENSITIVE as u32;
         // Should allow setting this; NULL is sane but not fully flexible.
         // https://docs.microsoft.com/en-us/windows/win32/secauthz/security-descriptors
         let mut security_descriptor = self.security_descriptor;
         object_attributes.SecurityDescriptor = match security_descriptor {
-            Some(ref mut val) => val as *mut SECURITY_DESCRIPTOR as PVOID,
-            None => NULL,
+            Some(ref mut val) => val as *mut SECURITY_DESCRIPTOR as *mut c_void,
+            None => ptr::null_mut(),
         };
         // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service
         let mut security_qos = self.security_qos;
         object_attributes.SecurityQualityOfService = match security_qos {
-            Some(ref mut val) => val as PSECURITY_QUALITY_OF_SERVICE as PVOID,
-            None => NULL,
+            Some(ref mut val) => val as * mut SECURITY_QUALITY_OF_SERVICE as *mut c_void,
+            None => ptr::null_mut(),
         };
         let mut status_block = MaybeUninit::uninit();
 
@@ -564,12 +555,12 @@ impl OpenOptionsImpl {
             DeviceIoControl(
                 link_file.as_raw_handle() as HANDLE,
                 FSCTL_SET_REPARSE_POINT,
-                reparse_data_vec.as_ptr() as LPVOID,
+                reparse_data_vec.as_ptr() as *const c_void,
                 reparse_data_vec.len() as u32,
-                NULL,
+                ptr::null_mut(),
                 0,
-                NULL as LPDWORD,
-                NULL as * mut OVERLAPPED,
+                ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         let r = cvt::cvt(bool_result).map(|_v| ());
@@ -610,7 +601,7 @@ impl OpenOptionsImpl {
             SetFileInformationByHandle(
                 to_remove.as_raw_handle() as HANDLE,
                 FileDispositionInfo,
-                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as LPVOID,
+                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
                 mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
             )
         };
@@ -628,7 +619,7 @@ impl OpenOptionsImpl {
             DeviceIoControl(
                 handle,
                 FSCTL_GET_REPARSE_POINT,
-                NULL,
+                ptr::null(),
                 0,
                 // output buffer
                 reparse_buffer.as_mut_ptr().cast(),
@@ -1034,7 +1025,7 @@ impl OpenOptionsExt for OpenOptions {
 
     fn security_qos_impersonation(&mut self, level: u32) -> &mut Self {
         self._impl
-            .with_security_qos(|mut qos| qos.ImpersonationLevel = level);
+            .with_security_qos(|mut qos| qos.ImpersonationLevel = level as i32);
         self
     }
 
@@ -1097,7 +1088,7 @@ impl<'a> ReadDirImpl<'a> {
             GetFileInformationByHandleEx(
                 self.d.as_raw_handle() as HANDLE,
                 class,
-                buffer.as_mut_ptr() as LPVOID,
+                buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as u32,
             )
         });
