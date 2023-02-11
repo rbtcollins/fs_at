@@ -1,7 +1,8 @@
 use std::{fmt, mem::MaybeUninit};
 
 use ntapi::ntrtl::{RtlInitUnicodeStringEx, RtlNtStatusToDosError};
-use winapi::shared::ntdef::{NTSTATUS, NT_SUCCESS, UNICODE_STRING};
+use winapi::shared::ntdef::NT_SUCCESS;
+use windows_sys::Win32::Foundation::{NTSTATUS, UNICODE_STRING};
 
 pub struct NTStatusError {
     pub status: NTSTATUS,
@@ -52,9 +53,16 @@ impl TryFrom<Vec<u16>> for OSUnicodeString {
                 content.as_mut_ptr(),
             ))
         }?;
+        // The manual copying of fields is because RtlInitUnicodeStringEx is
+        // working on the winapi type definition.
+        let winapi_string = unsafe { inner.assume_init() };
         Ok(OSUnicodeString {
             _content: content,
-            inner: unsafe { inner.assume_init() },
+            inner: UNICODE_STRING {
+                Length: winapi_string.Length,
+                MaximumLength: winapi_string.MaximumLength,
+                Buffer: winapi_string.Buffer,
+            },
         })
     }
 }

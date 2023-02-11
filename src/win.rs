@@ -19,38 +19,24 @@ use ntapi::ntioapi::{
     FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
     FILE_SYNCHRONOUS_IO_NONALERT, REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
 };
-use winapi::{
-    ctypes,
-    shared::{
-        minwindef::{LPDWORD, LPVOID, TRUE, ULONG},
-        ntdef::{HANDLE, NULL, OBJECT_ATTRIBUTES, OBJ_CASE_INSENSITIVE, PLARGE_INTEGER, PVOID},
-        winerror::{
-            ERROR_DIRECTORY, ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT,
-            ERROR_NO_MORE_FILES,
-        },
-    },
-    um::{
-        fileapi::{SetFileInformationByHandle, FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO},
-        ioapiset::DeviceIoControl,
-        minwinbase::{
-            FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-            LPOVERLAPPED,
-        },
-        winbase::GetFileInformationByHandleEx,
-        winioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
-        winnt::{
-            DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-            FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, GENERIC_READ, GENERIC_WRITE,
-            IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-            PSECURITY_QUALITY_OF_SERVICE, SECURITY_CONTEXT_TRACKING_MODE, SECURITY_DESCRIPTOR,
-            SECURITY_QUALITY_OF_SERVICE, SYNCHRONIZE,
-        },
-    },
-};
+use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
 
 use sugar::{NTStatusError, OSUnicodeString};
-use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+use windows_sys::Win32::{
+    Foundation::{ERROR_CANT_RESOLVE_FILENAME, HANDLE, TRUE, ERROR_DIRECTORY, ERROR_NOT_A_REPARSE_POINT, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
+    Storage::FileSystem::{
+        FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
+        GetFileInformationByHandleEx, NtCreateFile, SetFileInformationByHandle, DELETE,
+        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO, SYNCHRONIZE, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    },
+    System::{
+        SystemServices::{GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT},
+        WindowsProgramming::OBJECT_ATTRIBUTES,
+        IO::DeviceIoControl, Kernel::OBJ_CASE_INSENSITIVE, Ioctl::{FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT},
+    }, Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
+};
 
 use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
@@ -58,8 +44,9 @@ pub mod exports {
     pub use super::OpenOptionsExt;
     #[doc(no_inline)]
     pub use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
+
     #[doc(no_inline)]
-    pub use winapi::um::winnt::SECURITY_DESCRIPTOR;
+    pub use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 }
 
 #[derive(Clone, Default)]
@@ -76,8 +63,8 @@ pub(crate) struct OpenOptionsImpl {
     desired_access: Option<DesiredAccess>,
     create_options: Option<CreateOptions>,
     //https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#dwFlagsAndAttributes
-    file_attributes: ULONG,
-    object_attributes: ULONG,
+    file_attributes: u32,
+    object_attributes: u32,
     security_descriptor: Option<SECURITY_DESCRIPTOR>,
     security_qos: Option<SECURITY_QUALITY_OF_SERVICE>,
 }
@@ -125,7 +112,7 @@ fn make_already_exists_error() -> io::Error {
 }
 
 pub(crate) fn make_loop_error() -> io::Error {
-    io::Error::from_raw_os_error(winapi::shared::winerror::ERROR_CANT_RESOLVE_FILENAME as i32)
+    io::Error::from_raw_os_error(ERROR_CANT_RESOLVE_FILENAME as i32)
 }
 
 // Cache the workaround for https://twitter.com/rbtcollins/status/1617211985384407044
@@ -136,7 +123,7 @@ mod procmon {
         sync::atomic::{AtomicBool, Ordering},
     };
 
-    use winapi::shared::winerror::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 
     static WORKAROUND_CHECKED: once_cell::sync::Lazy<AtomicBool> =
         once_cell::sync::Lazy::new(|| false.into());
@@ -209,10 +196,10 @@ impl OpenOptionsImpl {
     where
         MLE: Fn() -> io::Error,
     {
-        let mut handle = MaybeUninit::uninit();
+        let mut handle: MaybeUninit<HANDLE> = MaybeUninit::uninit();
         let mut object_attributes: OBJECT_ATTRIBUTES = unsafe { zeroed() };
         object_attributes.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
-        object_attributes.RootDirectory = f.as_raw_handle() as *mut ctypes::c_void;
+        object_attributes.RootDirectory = f.as_raw_handle() as isize;
         let u16_path = path.as_os_str().encode_wide().collect::<Vec<u16>>();
         let mut rtl_string = OSUnicodeString::try_from(u16_path)?;
         object_attributes.ObjectName = &mut rtl_string.inner;
@@ -221,28 +208,28 @@ impl OpenOptionsImpl {
         // should be permitted through? Everything?
         // https://docs.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
         // only specifies OBJ_CASE_INSENSITIVE
-        object_attributes.Attributes = self.object_attributes & OBJ_CASE_INSENSITIVE;
+        object_attributes.Attributes = self.object_attributes & OBJ_CASE_INSENSITIVE as u32;
         // Should allow setting this; NULL is sane but not fully flexible.
         // https://docs.microsoft.com/en-us/windows/win32/secauthz/security-descriptors
         let mut security_descriptor = self.security_descriptor;
         object_attributes.SecurityDescriptor = match security_descriptor {
-            Some(ref mut val) => val as *mut SECURITY_DESCRIPTOR as PVOID,
-            None => NULL,
+            Some(ref mut val) => val as *mut SECURITY_DESCRIPTOR as *mut c_void,
+            None => ptr::null_mut(),
         };
         // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service
         let mut security_qos = self.security_qos;
         object_attributes.SecurityQualityOfService = match security_qos {
-            Some(ref mut val) => val as PSECURITY_QUALITY_OF_SERVICE as PVOID,
-            None => NULL,
+            Some(ref mut val) => val as * mut SECURITY_QUALITY_OF_SERVICE as *mut c_void,
+            None => ptr::null_mut(),
         };
         let mut status_block = MaybeUninit::uninit();
 
         // Perhaps not worth exposing?
         let mut allocation_size = self.allocation_size;
         let allocation_size_ptr = if allocation_size > 0 {
-            &mut allocation_size as *mut i64 as PLARGE_INTEGER
+            &mut allocation_size as *mut i64
         } else {
-            0 as PLARGE_INTEGER
+            ptr::null_mut::<i64>()
         };
 
         let file_attributes = if self.file_attributes == 0 {
@@ -260,7 +247,7 @@ impl OpenOptionsImpl {
         // This should be exposed (e.g. to permit secure temp dirs, secure untarring etc).
         let share_access = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         unsafe {
-            let ntstatus = ntapi::ntioapi::NtCreateFile(
+            let ntstatus = NtCreateFile(
                 handle.as_mut_ptr(),
                 desired_access,
                 &mut object_attributes,
@@ -283,14 +270,14 @@ impl OpenOptionsImpl {
         // FILE_SUPERSEDED
         // FILE_EXISTS
         // FILE_DOES_NOT_EXIST
-        let information = ULONG::try_from(status_block.Information)
+        let information = u32::try_from(status_block.Information)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         match information {
             FILE_CREATED | FILE_OPENED | FILE_OVERWRITTEN => {
                 // could be success : we have an FD
                 // Check if we're opening
-                let handle = unsafe { handle.assume_init() };
+                let handle: HANDLE = unsafe { handle.assume_init() };
 
                 if matches!(open_symlink, OpenSymLink::RaiseError(_)) && Self::is_symlink(handle)? {
                     // we found a symlink (due to setting
@@ -508,7 +495,7 @@ impl OpenOptionsImpl {
         // Size of the union, -1 for the 1 byte in-struct array, + path lengths.
         let reparse_data_length =
             mem::size_of::<REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer>() - 1 + path_length * 2;
-        // ULONG + USHORT*2
+        // u32 + USHORT*2
         let reparse_length = reparse_data_length + 8;
         let mut reparse_data_vec: Vec<u8> = vec![0; reparse_length];
 
@@ -568,12 +555,12 @@ impl OpenOptionsImpl {
             DeviceIoControl(
                 link_file.as_raw_handle() as HANDLE,
                 FSCTL_SET_REPARSE_POINT,
-                reparse_data_vec.as_ptr() as LPVOID,
+                reparse_data_vec.as_ptr() as *const c_void,
                 reparse_data_vec.len() as u32,
-                NULL,
+                ptr::null_mut(),
                 0,
-                NULL as LPDWORD,
-                NULL as LPOVERLAPPED,
+                ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
         let r = cvt::cvt(bool_result).map(|_v| ());
@@ -614,7 +601,7 @@ impl OpenOptionsImpl {
             SetFileInformationByHandle(
                 to_remove.as_raw_handle() as HANDLE,
                 FileDispositionInfo,
-                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as LPVOID,
+                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
                 mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
             )
         };
@@ -622,7 +609,7 @@ impl OpenOptionsImpl {
         Ok(())
     }
 
-    fn is_symlink(handle: *mut ctypes::c_void) -> Result<bool> {
+    fn is_symlink(handle: HANDLE) -> Result<bool> {
         let mut reparse_buffer: Aligned<
             A8,
             [MaybeUninit<u8>; MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize],
@@ -632,7 +619,7 @@ impl OpenOptionsImpl {
             DeviceIoControl(
                 handle,
                 FSCTL_GET_REPARSE_POINT,
-                NULL,
+                ptr::null(),
                 0,
                 // output buffer
                 reparse_buffer.as_mut_ptr().cast(),
@@ -655,7 +642,7 @@ impl OpenOptionsImpl {
             }
             return Ok(false);
         };
-        if out_size < size_of::<ULONG>() as u32 {
+        if out_size < size_of::<u32>() as u32 {
             // Success but not enough data to read the tag
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -773,11 +760,10 @@ pub trait OpenOptionsExt {
     Only takes effect when creating a file.
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
@@ -803,7 +789,6 @@ pub trait OpenOptionsExt {
     implementation detail and could change in future.
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
@@ -835,7 +820,6 @@ pub trait OpenOptionsExt {
     is always included. This is an implementation detail and could change in future.
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
@@ -865,11 +849,10 @@ pub trait OpenOptionsExt {
     [Microsoft API documentation](https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea#dwFlagsAndAttributes) - see the dwFlagsAndAttributes values.
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_BACKUP_SEMANTICS};
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
@@ -881,22 +864,22 @@ pub trait OpenOptionsExt {
 
     let mut options = OpenOptions::default();
     options.read(true);
-    options.file_attributes(winapi::um::winnt::FILE_ATTRIBUTE_TEMPORARY);
+    options.file_attributes(FILE_ATTRIBUTE_TEMPORARY);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
 
     */
-    fn file_attributes(&mut self, val: ULONG) -> &mut Self;
+    fn file_attributes(&mut self, val: u32) -> &mut Self;
 
     /**
     Set the Attributes field of the ObjectAttributes parameter to NTCreateFile.
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
@@ -908,13 +891,13 @@ pub trait OpenOptionsExt {
 
     let mut options = OpenOptions::default();
     options.read(true);
-    options.object_attributes(winapi::shared::ntdef::OBJ_CASE_INSENSITIVE);
+    options.object_attributes(OBJ_CASE_INSENSITIVE as u32);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
 
     The default behaviour requests case sensitive behaviour from Windows, but due to Windows kernel behaviour unless explicit configuration outside of the scope of this crate has been done, case preserving case insensitive semantics will always apply.
     */
-    fn object_attributes(&mut self, val: ULONG) -> &mut Self;
+    fn object_attributes(&mut self, val: u32) -> &mut Self;
 
     /**
     Set the SecurityDescriptor field of the ObjectsAttributes parameter to NTCreateFile.
@@ -933,23 +916,22 @@ pub trait OpenOptionsExt {
     [Microsoft API documentation](https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service)
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::{Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS, Security::SecurityIdentification};
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
 
     let mut options = fs::OpenOptions::new();
     options.read(true);
-    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS as u32);
     let mut parent_dir = options.open(".").unwrap();
 
     let mut options = OpenOptions::default();
     options.read(true);
-    options.security_qos_impersonation(winapi::um::winnt::SecurityIdentification);
+    options.security_qos_impersonation(SecurityIdentification as u32);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
      */
@@ -961,11 +943,10 @@ pub trait OpenOptionsExt {
     [Microsoft API documentation](https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service)
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::{Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS, Security::SECURITY_DYNAMIC_TRACKING};
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
@@ -977,7 +958,7 @@ pub trait OpenOptionsExt {
 
     let mut options = OpenOptions::default();
     options.read(true);
-    options.security_qos_context_tracking(winapi::um::winnt::SECURITY_DYNAMIC_TRACKING);
+    options.security_qos_context_tracking(SECURITY_DYNAMIC_TRACKING);
     let dir_file = options.mkdir_at(&mut parent_dir, "foo");
     ```
      */
@@ -989,11 +970,10 @@ pub trait OpenOptionsExt {
     [Microsoft API documentation](https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service)
 
     ```no_run
-    extern crate winapi;
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
-    use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
@@ -1028,12 +1008,12 @@ impl OpenOptionsExt for OpenOptions {
         self
     }
 
-    fn file_attributes(&mut self, val: ULONG) -> &mut Self {
+    fn file_attributes(&mut self, val: u32) -> &mut Self {
         self._impl.file_attributes = val;
         self
     }
 
-    fn object_attributes(&mut self, val: ULONG) -> &mut Self {
+    fn object_attributes(&mut self, val: u32) -> &mut Self {
         self._impl.object_attributes = val;
         self
     }
@@ -1045,7 +1025,7 @@ impl OpenOptionsExt for OpenOptions {
 
     fn security_qos_impersonation(&mut self, level: u32) -> &mut Self {
         self._impl
-            .with_security_qos(|mut qos| qos.ImpersonationLevel = level);
+            .with_security_qos(|mut qos| qos.ImpersonationLevel = level as i32);
         self
     }
 
@@ -1087,7 +1067,7 @@ impl<'a> ReadDirImpl<'a> {
         Ok(result)
     }
 
-    fn fill_buffer(&mut self, class: ULONG) -> Result<bool> {
+    fn fill_buffer(&mut self, class: FILE_INFO_BY_HANDLE_CLASS) -> Result<bool> {
         let buffer = self.buffer.as_mut().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Other,
@@ -1108,7 +1088,7 @@ impl<'a> ReadDirImpl<'a> {
             GetFileInformationByHandleEx(
                 self.d.as_raw_handle() as HANDLE,
                 class,
-                buffer.as_mut_ptr() as LPVOID,
+                buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as u32,
             )
         });
@@ -1179,7 +1159,7 @@ mod tests {
 
     use tempfile::TempDir;
     use test_log::test;
-    use winapi::shared::ntdef::OBJ_CASE_INSENSITIVE;
+    use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 
     use crate::{os::windows::OpenOptionsExt, testsupport::open_dir, OpenOptions};
 
@@ -1198,7 +1178,7 @@ mod tests {
         let mut create_opt = OpenOptions::default();
         create_opt.create(true);
         create_opt.mkdir_at(&parent_file, "child")?;
-        create_opt.object_attributes(OBJ_CASE_INSENSITIVE);
+        create_opt.object_attributes(OBJ_CASE_INSENSITIVE as u32);
         // Incorrectly passes because we're just using .create() now
         create_opt.mkdir_at(&parent_file, "Child")?;
         Ok(())
