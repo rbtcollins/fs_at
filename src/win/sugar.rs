@@ -1,8 +1,11 @@
 use std::{fmt, mem::MaybeUninit};
 
-use ntapi::ntrtl::{RtlInitUnicodeStringEx, RtlNtStatusToDosError};
-use winapi::shared::ntdef::NT_SUCCESS;
-use windows_sys::Win32::Foundation::{NTSTATUS, UNICODE_STRING};
+use windows_sys::Win32::{
+    Foundation::{
+        RtlNtStatusToDosError, NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_SUCCESS, UNICODE_STRING,
+    },
+    System::{SystemServices::UNICODE_STRING_MAX_CHARS, WindowsProgramming::RtlInitUnicodeString},
+};
 
 pub struct NTStatusError {
     pub status: NTSTATUS,
@@ -10,7 +13,7 @@ pub struct NTStatusError {
 
 impl NTStatusError {
     pub fn from(status: NTSTATUS) -> std::result::Result<(), NTStatusError> {
-        if NT_SUCCESS(status) {
+        if status >= 0 {
             Ok(())
         } else {
             Err(NTStatusError { status })
@@ -48,7 +51,7 @@ impl TryFrom<Vec<u16>> for OSUnicodeString {
         content.push(0);
         let mut inner = MaybeUninit::uninit();
         unsafe {
-            NTStatusError::from(RtlInitUnicodeStringEx(
+            NTStatusError::from(init_unicode_string(
                 inner.as_mut_ptr(),
                 content.as_mut_ptr(),
             ))
@@ -65,4 +68,25 @@ impl TryFrom<Vec<u16>> for OSUnicodeString {
             },
         })
     }
+}
+
+// RtlInitUnicodeStringEx isn't available in windows_sys at this time (see https://github.com/microsoft/win32metadata/issues/1461)
+// so we're going to roll our own. We'll rely on RtlInitUnicodeString to do this, and just make sure we don't pass it information that would
+// induce an error.
+unsafe fn init_unicode_string(
+    destination_string: *mut UNICODE_STRING,
+    source_string: *mut u16,
+) -> NTSTATUS {
+    if destination_string.is_null() && !source_string.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+    let mut cursor = 0;
+    while *(source_string.offset(cursor)) != 0 {
+        cursor += 1;
+        if cursor == UNICODE_STRING_MAX_CHARS as isize {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    RtlInitUnicodeString(destination_string, source_string);
+    STATUS_SUCCESS
 }
