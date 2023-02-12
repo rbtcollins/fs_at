@@ -49,68 +49,103 @@ use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
 use exports::SECURITY_CONTEXT_TRACKING_MODE;
 
-use self::reparse_definitions::{
-    REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER,
+use self::windows_sys_gap_defs::{
+    reparse_definitions::{REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER},
+    SYMLINK_FLAG_RELATIVE,
 };
 
 pub mod exports {
     pub use super::OpenOptionsExt;
-    // SECURITY_CONTEXT_TRACKING_MODE is not available in windows_sys yet, but it's a pretty simple definition
-    // so in order to maintain API compatibility we'll replicate it here.
-    #[allow(non_camel_case_types)]
-    pub type SECURITY_CONTEXT_TRACKING_MODE = u8;
+
+    pub use super::windows_sys_gap_defs::SECURITY_CONTEXT_TRACKING_MODE;
 
     #[doc(no_inline)]
     pub use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 }
 
-/// Strictly speaking this should be provided by something like windows_sys, however the definition isn't there,
-/// so we'll replicate it from the headers. These structures impact safety sensitive code and should only be changed
-/// in order to more accurately reflect the definition in Ntifs.h
-#[allow(non_snake_case)]
-mod reparse_definitions {
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct REPARSE_DATA_BUFFER {
-        pub ReparseTag: u32,
-        pub ReparseDataLength: u16,
-        pub Reserved: u16,
-        pub u: REPARSE_DATA_BUFFER_u,
+// These definitions should come from windows_sys, but don't exist right now.
+pub(crate) mod windows_sys_gap_defs {
+    use windows_sys::Win32::{
+        Foundation::{NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_SUCCESS, UNICODE_STRING},
+        System::{
+            SystemServices::UNICODE_STRING_MAX_CHARS, WindowsProgramming::RtlInitUnicodeString,
+        },
+    };
+
+    // RtlInitUnicodeStringEx isn't available in windows_sys at this time (see https://github.com/microsoft/win32metadata/issues/1461)
+    // so we're going to roll our own. We'll rely on RtlInitUnicodeString to do this, and just make sure we don't pass it information that would
+    // induce an error.
+    pub unsafe fn init_unicode_string(
+        destination_string: *mut UNICODE_STRING,
+        source_string: &mut [u16],
+    ) -> NTSTATUS {
+        if source_string.len() > UNICODE_STRING_MAX_CHARS as usize
+            || !source_string.iter().rev().any(|i| *i == 0)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        RtlInitUnicodeString(destination_string, source_string.as_mut_ptr());
+        STATUS_SUCCESS
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub union REPARSE_DATA_BUFFER_u {
-        pub SymbolicLinkReparseBuffer: REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer,
-        pub MountPointReparseBuffer: REPARSE_DATA_BUFFER_u_MountPointReparseBuffer,
-        pub GenericReparseBuffer: REPARSE_DATA_BUFFER_u_GenericReparseBuffer,
-    }
+    // SECURITY_CONTEXT_TRACKING_MODE is not available in windows_sys yet, but it's a pretty simple definition
+    // so in order to maintain API compatibility we'll replicate it here. See https://github.com/microsoft/win32metadata/issues/1464
+    #[allow(non_camel_case_types)]
+    pub type SECURITY_CONTEXT_TRACKING_MODE = u8;
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer {
-        pub SubstituteNameOffset: u16,
-        pub SubstituteNameLength: u16,
-        pub PrintNameOffset: u16,
-        pub PrintNameLength: u16,
-        pub Flags: u32,
-        pub PathBuffer: [u16; 1],
-    }
+    // Usually this is defined in a C header. There is no Rust equivalent of this in windows_sys yet, so we redefine it here.
+    // See https://github.com/microsoft/win32metadata/issues/1462
+    pub const SYMLINK_FLAG_RELATIVE: u32 = 1;
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct REPARSE_DATA_BUFFER_u_MountPointReparseBuffer {
-        pub SubstituteNameOffset: u16,
-        pub SubstituteNameLength: u16,
-        pub PrintNameOffset: u16,
-        pub PrintNameLength: u16,
-        pub PathBuffer: [u16; 1],
-    }
+    /// Strictly speaking this should be provided by something like windows_sys, however the definition isn't there,
+    /// so we'll replicate it from the headers. These structures impact safety sensitive code and should only be changed
+    /// in order to more accurately reflect the definition in Ntifs.h
+    /// See https://github.com/microsoft/win32metadata/issues/1463
+    #[allow(non_snake_case)]
+    pub(crate) mod reparse_definitions {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER {
+            pub ReparseTag: u32,
+            pub ReparseDataLength: u16,
+            pub Reserved: u16,
+            pub u: REPARSE_DATA_BUFFER_u,
+        }
 
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    pub struct REPARSE_DATA_BUFFER_u_GenericReparseBuffer {
-        pub DataBuffer: [u16; 1],
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub union REPARSE_DATA_BUFFER_u {
+            pub SymbolicLinkReparseBuffer: REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer,
+            pub MountPointReparseBuffer: REPARSE_DATA_BUFFER_u_MountPointReparseBuffer,
+            pub GenericReparseBuffer: REPARSE_DATA_BUFFER_u_GenericReparseBuffer,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer {
+            pub SubstituteNameOffset: u16,
+            pub SubstituteNameLength: u16,
+            pub PrintNameOffset: u16,
+            pub PrintNameLength: u16,
+            pub Flags: u32,
+            pub PathBuffer: [u16; 1],
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_MountPointReparseBuffer {
+            pub SubstituteNameOffset: u16,
+            pub SubstituteNameLength: u16,
+            pub PrintNameOffset: u16,
+            pub PrintNameLength: u16,
+            pub PathBuffer: [u16; 1],
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_GenericReparseBuffer {
+            pub DataBuffer: [u16; 1],
+        }
     }
 }
 
@@ -586,8 +621,6 @@ impl OpenOptionsImpl {
 
         reparse_data.ReparseDataLength = to_u16(reparse_data_length)?;
         if !absolute {
-            // Usually this is defined in a C header. There is no Rust equivalent of this in windows_sys yet, so we redefine it here.
-            const SYMLINK_FLAG_RELATIVE: u32 = 1;
             reparse_data.u.SymbolicLinkReparseBuffer.Flags = SYMLINK_FLAG_RELATIVE;
         }
         reparse_data
