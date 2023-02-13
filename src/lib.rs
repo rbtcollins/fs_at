@@ -503,6 +503,7 @@ mod tests {
 
     use tempfile::TempDir;
     use test_log::test;
+    use rayon::prelude::*;
 
     use crate::{
         read_dir, testsupport::open_dir, DirEntry, LinkEntryType, OpenOptions, OpenOptionsWriteMode,
@@ -1032,6 +1033,17 @@ mod tests {
     }
 
     #[test]
+    fn readdir_sync_send() -> Result<()> {
+        let (_tmp, mut parent_dir, _pathname) = setup()?;
+        let dirstream = read_dir(&mut parent_dir)?;
+        dirstream.par_bridge().try_for_each(|dir_entry| -> Result<()> {
+            dir_entry?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+     #[test]
     fn readdir() -> Result<()> {
         let (_tmp, mut parent_dir, _pathname) = setup()?;
         assert_eq!(
