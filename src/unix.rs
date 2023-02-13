@@ -246,13 +246,48 @@ impl OpenOptionsExt for OpenOptions {
 #[derive(Debug)]
 pub(crate) struct ReadDirImpl<'a> {
     // Since we clone the FD, the original FD is now separate. In theory.
-    // However for Windows we use the File directly, thus here we need to
-    // pretend.
-    _phantom: PhantomData<&'a File>,
-    // Set to None after we closedir it. Perhaps we should we impl Send and Sync
+    //
+    // In practice they may share the same file offset, and some OS's use that
+    // for managing dirstream state; thus both the original and the cloned fd
+    // that the DIR takes ownership of must not be used concurrently. The
+    // PhantomData here causes the borrow checker to consider the mut borrow
+    // required for read_dir(&mut d) to extend to the life of the ReadDirImpl
+    // struct.
+    _phantom: PhantomData<&'a mut File>,
+
+    // Set to None after closedir is called on the pointed at struct.
+
+    //  Perhaps we should we impl Send and Sync
     // because the data referenced is owned by libc ?
     dir: Option<ptr::NonNull<libc::DIR>>,
 }
+
+// Safety: DIR is aligned correctly as it is returned by libc. Initialized by
+// libc and dereferencable. The original FD which might share library state is
+// mutably borrowed for the lifetime of the ReadDirImpl, enforced by the borrow
+// checker, granting us sole access to the dirstream unless other unsafe code is
+// used (e.g. cloning the fd before constructing a ReadDirImpl). Its possible
+// that on some platforms DIR is radically different, so we depend on Box<> to
+// figure out Send-ability of DIR.
+unsafe impl<'a> Send for ReadDirImpl<'a> where Box<libc::DIR> : Send {}
+
+// Safety: As above, DIR is aligned etc;  further all mutation uses mutable
+// borrows. There is no way to go from ReadDirImpl to &Dir, and synchronisation
+// is dependent on the MT-Safe behaviour of readdir.
+// https://www.gnu.org/software/libc/manual/html_node/Reading_002fClosing-Directory.html
+// says "Because of this, it is not safe to share a DIR object among multiple
+// threads, unless you use your own locking to ensure that no thread calls
+// readdir while another thread is still using the data from the previous call.
+// In the GNU C Library, it is safe to call readdir from multiple threads as
+// long as each thread uses its own DIR object. POSIX.1-2008 does not require
+// this to be safe, but we are not aware of any operating systems where it does
+// not work." We have a unique DIR object, and the borrow checker will not
+// permit concurrent calls to next/close/drop because of the unique &mut
+// constraint. POSIX does not require memory barriers, merely that no thread is
+// using the data returned by a different call. next() takes care to copy out
+// data to an OsString before returning, meeting that requirement.
+unsafe impl<'a> Sync for ReadDirImpl<'a> where Box<libc::DIR> : Sync {}
+
 
 impl<'a> ReadDirImpl<'a> {
     pub fn new(dir_file: &'a mut File) -> Result<Self> {
