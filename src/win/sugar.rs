@@ -8,9 +8,14 @@ pub struct NTStatusError {
     pub status: NTSTATUS,
 }
 
+/// Mimics the behavior of the NT_SUCCESS macro from Microsoft C headers
+fn nt_success(status: NTSTATUS) -> bool {
+    status >= 0
+}
+
 impl NTStatusError {
     pub fn from(status: NTSTATUS) -> std::result::Result<(), NTStatusError> {
-        if status >= 0 {
+        if nt_success(status) {
             Ok(())
         } else {
             Err(NTStatusError { status })
@@ -48,16 +53,10 @@ impl TryFrom<Vec<u16>> for OSUnicodeString {
         content.push(0);
         let mut inner = MaybeUninit::uninit();
         unsafe { NTStatusError::from(init_unicode_string(inner.as_mut_ptr(), &mut content)) }?;
-        // The manual copying of fields is because RtlInitUnicodeStringEx is
-        // working on the winapi type definition.
         let winapi_string = unsafe { inner.assume_init() };
         Ok(OSUnicodeString {
             _content: content,
-            inner: UNICODE_STRING {
-                Length: winapi_string.Length,
-                MaximumLength: winapi_string.MaximumLength,
-                Buffer: winapi_string.Buffer,
-            },
+            inner: winapi_string,
         })
     }
 }
