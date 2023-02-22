@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "fs_at"
-version = "0.0.7"
+version = "0.1.0"
 dependencies = [
  "aligned",
  "cfg-if 1.0.0",
