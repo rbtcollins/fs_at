@@ -183,13 +183,11 @@ dependencies = [
  "libc",
  "log",
  "nix",
- "ntapi",
  "once_cell",
  "rayon",
  "smart-default",
  "tempfile",
  "test-log",
- "winapi",
  "windows-sys",
 ]
 
@@ -291,15 +289,6 @@ dependencies = [
  "cfg-if 1.0.0",
  "libc",
  "static_assertions",
-]
-
-[[package]]
-name = "ntapi"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc51db7b362b205941f71232e56c625156eb9a929f8cf74a428fd5bc094a4afc"
-dependencies = [
- "winapi",
 ]
 
 [[package]]

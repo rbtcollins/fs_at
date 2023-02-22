@@ -13,40 +13,140 @@ use std::{
 };
 
 use aligned::{Aligned, A8};
-use ntapi::ntioapi::{
-    REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, FILE_CREATE, FILE_CREATED,
-    FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPEN, FILE_OPENED, FILE_OPEN_IF,
-    FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_OVERWRITTEN, FILE_SUPERSEDED,
-    FILE_SYNCHRONOUS_IO_NONALERT, REPARSE_DATA_BUFFER, SYMLINK_FLAG_RELATIVE,
-};
-use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
 
 use sugar::{NTStatusError, OSUnicodeString};
 use windows_sys::Win32::{
-    Foundation::{ERROR_CANT_RESOLVE_FILENAME, HANDLE, TRUE, ERROR_DIRECTORY, ERROR_NOT_A_REPARSE_POINT, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES},
+    Foundation::{
+        ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY, ERROR_INVALID_PARAMETER,
+        ERROR_NOT_A_REPARSE_POINT, ERROR_NO_MORE_FILES, HANDLE, TRUE,
+    },
+    Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
     Storage::FileSystem::{
         FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
         GetFileInformationByHandleEx, NtCreateFile, SetFileInformationByHandle, DELETE,
-        FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_WRITE, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_DISPOSITION_INFO, FILE_ID_BOTH_DIR_INFO, SYNCHRONIZE, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+        FILE_ATTRIBUTE_NORMAL, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE,
+        FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_OPEN,
+        FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+        MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYNCHRONIZE,
     },
     System::{
-        SystemServices::{GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT},
-        WindowsProgramming::OBJECT_ATTRIBUTES,
-        IO::DeviceIoControl, Kernel::OBJ_CASE_INSENSITIVE, Ioctl::{FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT},
-    }, Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
+        Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
+        Kernel::OBJ_CASE_INSENSITIVE,
+        SystemServices::{
+            GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
+        },
+        WindowsProgramming::{
+            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPENED,
+            FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+            FILE_SYNCHRONOUS_IO_NONALERT, OBJECT_ATTRIBUTES,
+        },
+        IO::DeviceIoControl,
+    },
 };
 
 use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
+use exports::SECURITY_CONTEXT_TRACKING_MODE;
+
+use self::windows_sys_gap_defs::{
+    reparse_definitions::{REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER},
+    SYMLINK_FLAG_RELATIVE,
+};
+
 pub mod exports {
     pub use super::OpenOptionsExt;
-    #[doc(no_inline)]
-    pub use winapi::um::winnt::SECURITY_CONTEXT_TRACKING_MODE;
+
+    pub use super::windows_sys_gap_defs::SECURITY_CONTEXT_TRACKING_MODE;
 
     #[doc(no_inline)]
     pub use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
+}
+
+// These definitions should come from windows_sys, but don't exist right now.
+pub(crate) mod windows_sys_gap_defs {
+    use windows_sys::Win32::{
+        Foundation::{NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_SUCCESS, UNICODE_STRING},
+        System::{
+            SystemServices::UNICODE_STRING_MAX_CHARS, WindowsProgramming::RtlInitUnicodeString,
+        },
+    };
+
+    // RtlInitUnicodeStringEx isn't available in windows_sys at this time (see https://github.com/microsoft/win32metadata/issues/1461)
+    // so we're going to roll our own. We'll rely on RtlInitUnicodeString to do this, and just make sure we don't pass it information that would
+    // induce an error.
+    pub unsafe fn init_unicode_string(
+        destination_string: *mut UNICODE_STRING,
+        source_string: &mut [u16],
+    ) -> NTSTATUS {
+        if source_string.len() > UNICODE_STRING_MAX_CHARS as usize
+            || !source_string.iter().rev().any(|i| *i == 0)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        RtlInitUnicodeString(destination_string, source_string.as_mut_ptr());
+        STATUS_SUCCESS
+    }
+
+    // SECURITY_CONTEXT_TRACKING_MODE is not available in windows_sys yet, but it's a pretty simple definition
+    // so in order to maintain API compatibility we'll replicate it here. See https://github.com/microsoft/win32metadata/issues/1464
+    #[allow(non_camel_case_types)]
+    pub type SECURITY_CONTEXT_TRACKING_MODE = u8;
+
+    // Usually this is defined in a C header. There is no Rust equivalent of this in windows_sys yet, so we redefine it here.
+    // See https://github.com/microsoft/win32metadata/issues/1462
+    pub const SYMLINK_FLAG_RELATIVE: u32 = 1;
+
+    /// Strictly speaking this should be provided by something like windows_sys, however the definition isn't there,
+    /// so we'll replicate it from the headers. These structures impact safety sensitive code and should only be changed
+    /// in order to more accurately reflect the definition in Ntifs.h
+    /// See https://github.com/microsoft/win32metadata/issues/1463
+    #[allow(non_snake_case)]
+    pub(crate) mod reparse_definitions {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER {
+            pub ReparseTag: u32,
+            pub ReparseDataLength: u16,
+            pub Reserved: u16,
+            pub u: REPARSE_DATA_BUFFER_u,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub union REPARSE_DATA_BUFFER_u {
+            pub SymbolicLinkReparseBuffer: REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer,
+            pub MountPointReparseBuffer: REPARSE_DATA_BUFFER_u_MountPointReparseBuffer,
+            pub GenericReparseBuffer: REPARSE_DATA_BUFFER_u_GenericReparseBuffer,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer {
+            pub SubstituteNameOffset: u16,
+            pub SubstituteNameLength: u16,
+            pub PrintNameOffset: u16,
+            pub PrintNameLength: u16,
+            pub Flags: u32,
+            pub PathBuffer: [u16; 1],
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_MountPointReparseBuffer {
+            pub SubstituteNameOffset: u16,
+            pub SubstituteNameLength: u16,
+            pub PrintNameOffset: u16,
+            pub PrintNameLength: u16,
+            pub PathBuffer: [u16; 1],
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct REPARSE_DATA_BUFFER_u_GenericReparseBuffer {
+            pub DataBuffer: [u16; 1],
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -219,7 +319,7 @@ impl OpenOptionsImpl {
         // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-security_quality_of_service
         let mut security_qos = self.security_qos;
         object_attributes.SecurityQualityOfService = match security_qos {
-            Some(ref mut val) => val as * mut SECURITY_QUALITY_OF_SERVICE as *mut c_void,
+            Some(ref mut val) => val as *mut SECURITY_QUALITY_OF_SERVICE as *mut c_void,
             None => ptr::null_mut(),
         };
         let mut status_block = MaybeUninit::uninit();
