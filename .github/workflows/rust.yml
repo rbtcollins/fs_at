@@ -1,11 +1,46 @@
 name: Rust
 
 on:
+  # test every branch, so renovate can automerge cleanly
   push:
-    branches: [main]
   pull_request:
     branches: [main]
 jobs:
+  build-docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        channel: ["1.62.1", stable, nightly]
+        target: [x86_64-unknown-freebsd]
+        include:
+          - target: x86_64-unknown-freebsd
+            run_tests: NO
+    env:
+      RUST_BACKTRACE: 1
+      CROSS_CONFIG: .github/cross.toml
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set environment variables appropriately for the build
+        run: |
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: setup cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+      - name: Install Rustup
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain=none --profile=minimal -y
+      - name: Install cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build within docker
+        run: |
+          cross build --target ${{matrix.target}}
+      - name: Test within docker
+        if: ${{matrix.run_tests == 'YES'}}
+        run: |
+          cross test --target ${{matrix.target}}
+
   build-unix:
     runs-on: ${{ matrix.os }}-latest
     strategy:
