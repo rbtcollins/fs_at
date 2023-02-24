@@ -35,7 +35,7 @@ jobs:
           cargo install cross --git https://github.com/cross-rs/cross
       - name: Build within docker
         run: |
-          cross build --target ${{matrix.target}}
+          cross build --all-targets --target ${{matrix.target}}
       - name: Test within docker
         if: ${{matrix.run_tests == 'YES'}}
         run: |
