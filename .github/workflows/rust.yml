@@ -19,7 +19,7 @@ jobs:
       RUST_BACKTRACE: 1
       CROSS_CONFIG: .github/cross.toml
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Set environment variables appropriately for the build
         run: |
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
