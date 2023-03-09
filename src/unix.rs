@@ -11,7 +11,7 @@ use std::{
 // This will probably take a few iterations to get right. The idea: always use
 // an openat64, and import the right variant for the platform. See File::open_c in [`std::sys::unix::fs`].
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os="macos", target_os="freebsd"))] {
+    if #[cfg(any(target_os="macos", target_os="freebsd", target_os="ios"))] {
         use libc::openat as openat64;
     } else {
         use libc::openat64;
