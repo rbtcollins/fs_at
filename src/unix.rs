@@ -11,7 +11,7 @@ use std::{
 // This will probably take a few iterations to get right. The idea: always use
 // an openat64, and import the right variant for the platform. See File::open_c in [`std::sys::unix::fs`].
 cfg_if::cfg_if! {
-    if #[cfg(any(target_os="macos", target_os="freebsd", target_os="ios"))] {
+    if #[cfg(any(target_os="macos", target_os="freebsd", target_os="ios", target_os="netbsd", target_os="illumos"))] {
         use libc::openat as openat64;
     } else {
         use libc::openat64;
@@ -269,7 +269,7 @@ pub(crate) struct ReadDirImpl<'a> {
 // used (e.g. cloning the fd before constructing a ReadDirImpl). Its possible
 // that on some platforms DIR is radically different, so we depend on Box<> to
 // figure out Send-ability of DIR.
-unsafe impl<'a> Send for ReadDirImpl<'a> where Box<libc::DIR> : Send {}
+unsafe impl<'a> Send for ReadDirImpl<'a> where Box<libc::DIR>: Send {}
 
 // Safety: As above, DIR is aligned etc;  further all mutation uses mutable
 // borrows. There is no way to go from ReadDirImpl to &Dir, and synchronisation
@@ -286,8 +286,7 @@ unsafe impl<'a> Send for ReadDirImpl<'a> where Box<libc::DIR> : Send {}
 // constraint. POSIX does not require memory barriers, merely that no thread is
 // using the data returned by a different call. next() takes care to copy out
 // data to an OsString before returning, meeting that requirement.
-unsafe impl<'a> Sync for ReadDirImpl<'a> where Box<libc::DIR> : Sync {}
-
+unsafe impl<'a> Sync for ReadDirImpl<'a> where Box<libc::DIR>: Sync {}
 
 impl<'a> ReadDirImpl<'a> {
     pub fn new(dir_file: &'a mut File) -> Result<Self> {
