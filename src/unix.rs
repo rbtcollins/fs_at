@@ -18,7 +18,7 @@ cfg_if::cfg_if! {
     }
 }
 
-use cvt::cvt_r;
+use crate::cvt::cvt_r;
 use libc::{c_int, mkdirat, mode_t};
 
 use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};

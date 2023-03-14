@@ -53,6 +53,8 @@ use std::{
     path::Path,
 };
 
+mod cvt;
+
 cfg_if::cfg_if! {
     if #[cfg(windows)] {
         mod win;
