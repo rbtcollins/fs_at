@@ -19,7 +19,7 @@ log = ["dep:log"]
 
 [dependencies]
 cfg-if = "1.0.0"
-cvt = "0.1.1"
+cvt = "0.1.2"
 log = { version = "0.4.17", optional = true }
 
 [dev-dependencies]
