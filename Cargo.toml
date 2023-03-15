@@ -30,7 +30,7 @@ rayon = "1.6.1"
 env_logger = "0.10.0"
 
 [target.'cfg(not(windows))'.dependencies]
-libc = "0.2.139"
+libc = "0.2.140"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more : consider it weak and something we can remove if expedient
 # later.
