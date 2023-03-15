@@ -26,7 +26,7 @@ log = { version = "0.4.17", optional = true }
 tempfile = "3.3.0"
 test-log = "0.2.11"
 fs-set-times = "0.18.1"
-rayon = "1.6.1"
+rayon = "1.7.0"
 env_logger = "0.10.0"
 
 [target.'cfg(not(windows))'.dependencies]
