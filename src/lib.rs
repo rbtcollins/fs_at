@@ -17,7 +17,8 @@
 //! crate doesn't abstract over fundamental differences, but it does attempt to
 //! provide consistent errors for key scenarios. As a concrete example creating
 //! a directory at the path of an existing link with follow disabled errors with
-//! AlreadyExists.
+//! AlreadyExists. In general platform documentation should be consulted to
+//! understand the underlying behaviour.
 //!
 //! On Linux this is achieved by reading back the path that was requested, as
 //! atomic mkdir isn't yet available. `mkdirat` is used so the parent directory
@@ -33,6 +34,7 @@
 //! directory or truncating a file at both the link target and the link source.
 //!
 //! Truncate+nofollow also varies by platform: See OpenOptions::truncate.
+//!
 //!
 //! Caveats:
 //! - On windows, procmon will cause the symlink resolution check to receive an
@@ -159,20 +161,21 @@ impl OpenOptions {
 
     /// Sets the option for truncating a previous file.
     ///
-    /// If a file is successfully opened with this option set it will truncate the file to 0 length if it already exists.
+    /// If a file is successfully opened with this option set it will truncate
+    /// the file to 0 length if it already exists.
     ///
     /// The file must be opened with write access for truncate to work.
     ///
     /// Behaviour of truncate on directories and symlink files is unspecified.
     ///
     /// On Windows a file-symlink from A to B when truncated with no-follow
-    /// `(.write(true).truncate(true).follow(false) )` will convert the target from
-    /// a symlink to an empty file. The Windows behaviour is compatible with the definition of O_TRUNC
-    /// on Unix - this case is unspecified. This cannot be made race-free, however
-    /// it seems like a race will at most destroy a link, not permit elevation of
-    /// privileges, so this can be handled by the caller by doing a readlink first,
-    /// treating a success as an EEXISTS error, and then actually performing the
-    /// no-follow truncation.
+    /// `(.write(true).truncate(true).follow(false) )` will convert the target
+    /// from a symlink to an empty file. The Windows behaviour is compatible
+    /// with the definition of O_TRUNC on Unix - this case is unspecified. This
+    /// cannot be made race-free, however it seems like a race will at most
+    /// destroy a link, not permit elevation of privileges, so this can be
+    /// handled by the caller by doing a readlink first, treating a success as
+    /// an EEXISTS error, and then actually performing the no-follow truncation.
     ///
     /// On Unix platforms EEXISTS tends to be returned instead.
     ///
@@ -301,6 +304,29 @@ impl OpenOptions {
     pub fn open_dir_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_dir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
+    }
+
+    /// Opens a path.
+    ///
+    /// This will open a file that refers to a path which could be normally
+    /// unopenable. This is useful for inspecting files in a race-free fashion
+    /// without requiring full permissions to them.
+    ///
+    /// Platform specific:
+    ///
+    /// Windows: sets FILE_FLAG_OPEN_REPARSE_POINT for createOptions. The
+    /// windows extension trait can be used to set dwAccessFlags. All
+    /// normal operations can be performed on a file opened in this way
+    /// (assuming appropriate access flags).
+    ///
+    /// Unix: sets O_NOFOLLOW | O_PATH. Many operations on the file handle are
+    /// restricted.
+    ///
+    /// MacOSX: Not implemented as O_PATH is not defined.
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_path_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
+        self._impl
+            .open_path_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
     }
 
     /// Creates a symlink at the path linkname pointing to target.
@@ -493,6 +519,8 @@ pub mod testsupport;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
+    use std::path::Path;
     use std::{
         ffi::OsStr,
         fs::{rename, File},
@@ -1155,6 +1183,67 @@ mod tests {
                 .read(true)
                 .open_dir_at(&parent_dir, "dir")?;
             OpenOptions::default().read(true).open_at(&dir, "file")?;
+            let children =
+                super::read_dir(&mut dir)?.map(|dir_entry| dir_entry.unwrap().name().to_owned());
+            assert_eq!(3, children.count());
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn open_path_at() -> Result<()> {
+        let (_tmp, parent_dir, _pathname) = setup()?;
+        // setup
+        {
+            let dir = OpenOptions::default().mkdir_at(&parent_dir, "dir")?;
+            OpenOptions::default()
+                .create_new(true)
+                .write(OpenOptionsWriteMode::Write)
+                .open_at(&dir, "file")?;
+            OpenOptions::default().symlink_at(&dir, "linkname", LinkEntryType::File, "target")?;
+        }
+
+        // case 1: open a dir
+        {
+            OpenOptions::default().open_path_at(&parent_dir, "dir")?;
+        }
+
+        // case 2: open a file
+        {
+            OpenOptions::default().open_path_at(&parent_dir, Path::new("dir").join("file"))?;
+        }
+
+        // case 3: open a link
+        {
+            OpenOptions::default().open_path_at(&parent_dir, Path::new("dir").join("linkname"))?;
+        }
+
+        // case 4: can we open-and-delete on windows
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Storage::FileSystem::DELETE;
+
+            use super::os::windows::{FileExt, OpenOptionsExt};
+
+            let f = OpenOptions::default()
+                .desired_access(DELETE)
+                .open_path_at(&parent_dir, "dir\\linkname")?;
+            f.delete_by_handle()?;
+        }
+
+        // case 4: can we traverse a directory on windows
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Storage::FileSystem::FILE_LIST_DIRECTORY;
+
+            use super::os::windows::OpenOptionsExt;
+
+            let mut dir = OpenOptions::default()
+                .desired_access(FILE_LIST_DIRECTORY)
+                .open_path_at(&parent_dir, "dir")?;
+
             let children =
                 super::read_dir(&mut dir)?.map(|dir_entry| dir_entry.unwrap().name().to_owned());
             assert_eq!(3, children.count());

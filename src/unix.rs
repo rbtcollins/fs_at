@@ -124,6 +124,13 @@ impl OpenOptionsImpl {
         self._open_at(d, path, flags)
     }
 
+    #[cfg(not(target_os = "macos"))]
+    pub fn open_path_at(&self, d: &File, path: &Path) -> Result<File> {
+        let flags =
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_PATH | libc::O_CLOEXEC | libc::O_NOCTTY;
+        self._open_at(d, path, flags)
+    }
+
     fn _open_at(&self, d: &File, path: &Path, flags: i32) -> Result<File> {
         let path = path.as_cstring()?;
         let mode = self.mode.unwrap_or(0o777);
