@@ -55,7 +55,7 @@ use self::windows_sys_gap_defs::{
 };
 
 pub mod exports {
-    pub use super::OpenOptionsExt;
+    pub use super::{FileExt, OpenOptionsExt};
 
     pub use super::windows_sys_gap_defs::SECURITY_CONTEXT_TRACKING_MODE;
 
@@ -542,6 +542,46 @@ impl OpenOptionsImpl {
         )
     }
 
+    pub fn open_path_at(&self, f: &File, path: &Path) -> Result<File> {
+        let desired_access = DesiredAccess(
+            SYNCHRONIZE
+                | if let Some(DesiredAccess(custom_access)) = self.desired_access {
+                    custom_access
+                } else {
+                    0
+                },
+        );
+        let create_disposition = self.get_file_disposition(false)?;
+        // TODO: create options needs to be controlled through OpenOptions too.
+        // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
+        // Rust itself uses - this lets the OS position tracker work. It also
+        // requires SYNCHRONIZE on the access mode.
+        let create_options = CreateOptions(
+            FILE_SYNCHRONOUS_IO_NONALERT
+                | if let Some(CreateOptions(custom_options)) = self.create_options {
+                    custom_options
+                } else {
+                    FILE_OPEN_REPARSE_POINT
+                },
+        );
+        #[cfg(feature = "log")]
+        log::trace!(
+            "open_path_at: {}, access: {:#0x?} create_options: {:#0x?}",
+            path.display(),
+            desired_access.0,
+            create_options.0
+        );
+
+        self.do_create_file(
+            f,
+            path,
+            desired_access,
+            create_disposition,
+            create_options,
+            open_link_file(),
+        )
+    }
+
     pub fn symlink_at(
         &self,
         d: &File,
@@ -696,19 +736,7 @@ impl OpenOptionsImpl {
             open_symlink,
         )?;
 
-        let mut delete_disposition = FILE_DISPOSITION_INFO {
-            DeleteFile: TRUE as u8,
-        };
-        let bool_result = unsafe {
-            SetFileInformationByHandle(
-                to_remove.as_raw_handle() as HANDLE,
-                FileDispositionInfo,
-                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
-                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-            )
-        };
-        cvt::cvt(bool_result).map(|_v| ())?;
-        Ok(())
+        to_remove.delete_by_handle()
     }
 
     fn is_symlink(handle: HANDLE) -> Result<bool> {
@@ -1142,6 +1170,32 @@ impl OpenOptionsExt for OpenOptions {
         self._impl
             .with_security_qos(|mut qos| qos.EffectiveOnly = native_value);
         self
+    }
+}
+
+/// Extends `File` with Windows capabilities.
+pub trait FileExt {
+    fn delete_by_handle(self) -> Result<()>;
+}
+
+impl FileExt for File {
+    fn delete_by_handle(self) -> Result<()> {
+        let mut delete_disposition = FILE_DISPOSITION_INFO {
+            DeleteFile: TRUE as u8,
+        };
+        let bool_result = unsafe {
+            SetFileInformationByHandle(
+                self.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
+                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        cvt::cvt(bool_result).map(|_v| ())?;
+        // Make it explicit that we're dropping the handle, as that can cause IO
+        // and it makes profile etc easier.
+        mem::drop(self);
+        Ok(())
     }
 }
 
