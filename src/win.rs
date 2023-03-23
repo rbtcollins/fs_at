@@ -72,9 +72,11 @@ pub(crate) mod windows_sys_gap_defs {
         },
     };
 
-    // RtlInitUnicodeStringEx isn't available in windows_sys at this time (see https://github.com/microsoft/win32metadata/issues/1461)
-    // so we're going to roll our own. We'll rely on RtlInitUnicodeString to do this, and just make sure we don't pass it information that would
-    // induce an error.
+    // RtlInitUnicodeStringEx isn't available in windows_sys at this time, and
+    // won't be (see https://github.com/microsoft/win32metadata/issues/1461) so
+    // we're going to roll our own. We'll rely on RtlInitUnicodeString to do
+    // this, and just make sure we don't pass it information that would induce
+    // an error.
     pub unsafe fn init_unicode_string(
         destination_string: *mut UNICODE_STRING,
         source_string: &mut [u16],
