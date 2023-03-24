@@ -1230,7 +1230,7 @@ mod tests {
             let f = OpenOptions::default()
                 .desired_access(DELETE)
                 .open_path_at(&parent_dir, "dir\\linkname")?;
-            f.delete_by_handle()?;
+            f.delete_by_handle().map_err(|(_, e)| e)?;
         }
 
         // case 4: can we traverse a directory on windows

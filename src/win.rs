@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, ErrorKind, Result},
     mem::{self, size_of, zeroed, MaybeUninit},
-    os::windows::prelude::{AsRawHandle, FromRawHandle, OsStrExt, OsStringExt},
+    os::windows::prelude::{AsRawHandle, FromRawHandle, MetadataExt, OsStrExt, OsStringExt},
     path::Path,
     ptr::{self, null_mut},
     slice,
@@ -17,14 +17,16 @@ use aligned::{Aligned, A8};
 use sugar::{NTStatusError, OSUnicodeString};
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY, ERROR_INVALID_PARAMETER,
-        ERROR_NOT_A_REPARSE_POINT, ERROR_NO_MORE_FILES, HANDLE, TRUE,
+        ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY, ERROR_INVALID_FUNCTION,
+        ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT, ERROR_NOT_SUPPORTED,
+        ERROR_NO_MORE_FILES, HANDLE, TRUE,
     },
     Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
     Storage::FileSystem::{
-        FileDispositionInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-        GetFileInformationByHandleEx, NtCreateFile, SetFileInformationByHandle, DELETE,
-        FILE_ATTRIBUTE_NORMAL, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE,
+        FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
+        FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx, NtCreateFile,
+        SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+        FILE_BASIC_INFO, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE,
         FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_OPEN,
         FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
@@ -37,8 +39,8 @@ use windows_sys::Win32::{
             GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
         },
         WindowsProgramming::{
-            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPENED,
-            FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFO_EX, FILE_DOES_NOT_EXIST,
+            FILE_EXISTS, FILE_OPENED, FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
             FILE_SYNCHRONOUS_IO_NONALERT, OBJECT_ATTRIBUTES,
         },
         IO::DeviceIoControl,
@@ -51,7 +53,8 @@ use exports::SECURITY_CONTEXT_TRACKING_MODE;
 
 use self::windows_sys_gap_defs::{
     reparse_definitions::{REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER},
-    SYMLINK_FLAG_RELATIVE,
+    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_POSIX_SEMANTICS, SYMLINK_FLAG_RELATIVE,
 };
 
 pub mod exports {
@@ -149,6 +152,15 @@ pub(crate) mod windows_sys_gap_defs {
             pub DataBuffer: [u16; 1],
         }
     }
+
+    // https://github.com/microsoft/wdkmetadata/issues/22 these are not defined
+    // and should be
+    // pub(crate) const FILE_DISPOSITION_DO_NOT_DELETE: u32 = 0x00000000;
+    pub(crate) const FILE_DISPOSITION_DELETE: u32 = 0x00000001;
+    pub(crate) const FILE_DISPOSITION_POSIX_SEMANTICS: u32 = 0x00000002;
+    // pub(crate) const FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK: u32 = 0x00000004;
+    // pub(crate) const FILE_DISPOSITION_ON_CLOSE: u32 = 0x00000008;
+    pub(crate) const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: u32 = 0x00000010;
 }
 
 #[derive(Clone, Default)]
@@ -736,7 +748,7 @@ impl OpenOptionsImpl {
             open_symlink,
         )?;
 
-        to_remove.delete_by_handle()
+        to_remove.delete_by_handle().map_err(|(_, e)| e)
     }
 
     fn is_symlink(handle: HANDLE) -> Result<bool> {
@@ -1175,27 +1187,133 @@ impl OpenOptionsExt for OpenOptions {
 
 /// Extends `File` with Windows capabilities.
 pub trait FileExt {
-    fn delete_by_handle(self) -> Result<()>;
+    // Deletes the file by the open handle. This will attempt to use posix
+    // semantics, if that fails with an appropriate error code, it will then
+    // attempt win7 deletion semantics, and if that fails with access denied, it
+    // will attempt to remove the readonly attribute, mark the file for
+    // deletion, and finally restore the attribute (for correctness with
+    // hardlinked files).
+    //
+    // On unhandled errors, the file is returned along with the error, to permit
+    // alternative code paths by the caller.
+    fn delete_by_handle(self) -> std::result::Result<(), (File, io::Error)>;
+}
+
+fn delete_with_posix(f: File) -> std::result::Result<File, (File, io::Error)> {
+    // Try for modern delete semantics: POSIX_SEMANTICS and bypass the
+    // readonly flag.
+    let mut delete_disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_DELETE
+            | FILE_DISPOSITION_POSIX_SEMANTICS
+            | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+    };
+    match cvt::cvt(unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle() as HANDLE,
+            FileDispositionInfoEx,
+            &mut delete_disposition as *mut FILE_DISPOSITION_INFO_EX as *const c_void,
+            mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    }) {
+        Ok(_) => Ok(f),
+        Err(e) => Err((f, e)),
+    }
+}
+
+fn delete_with_win7(f: File) -> std::result::Result<File, (File, io::Error)> {
+    let mut delete_disposition = FILE_DISPOSITION_INFO {
+        DeleteFile: TRUE as u8,
+    };
+    match cvt::cvt(unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle() as HANDLE,
+            FileDispositionInfo,
+            &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
+            mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }) {
+        Ok(_) => Ok(f),
+        Err(e) => Err((f, e)),
+    }
+}
+
+fn delete_with_win7_readonly(
+    f: File,
+    e: io::Error,
+) -> std::result::Result<File, (File, io::Error)> {
+    // 1) reset readonly attribute
+    let m = match f.metadata() {
+        Ok(m) => m,
+        Err(e) => return Err((f, e)),
+    };
+    if !m.permissions().readonly() {
+        return Err((f, e));
+    }
+    let mut info = FILE_BASIC_INFO {
+        FileAttributes: m.file_attributes() & !FILE_ATTRIBUTE_READONLY,
+        CreationTime: m.creation_time() as _,
+        LastAccessTime: m.last_access_time() as _,
+        LastWriteTime: m.last_write_time() as _,
+        ChangeTime: 0,
+    };
+    match cvt::cvt(unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            &mut info as *mut FILE_BASIC_INFO as *mut _,
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }) {
+        Ok(_) => (),
+        Err(e) => return Err((f, e)),
+    };
+    // 2) mark for deletion
+    let f = delete_with_win7(f)?;
+    // 3) reapply readonly attribute
+    info.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    match cvt::cvt(unsafe {
+        SetFileInformationByHandle(
+            f.as_raw_handle() as HANDLE,
+            FileBasicInfo,
+            &mut info as *mut FILE_BASIC_INFO as *mut _,
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }) {
+        Ok(_) => Ok(f),
+        Err(e) => Err((f, e)),
+    }
 }
 
 impl FileExt for File {
-    fn delete_by_handle(self) -> Result<()> {
-        let mut delete_disposition = FILE_DISPOSITION_INFO {
-            DeleteFile: TRUE as u8,
-        };
-        let bool_result = unsafe {
-            SetFileInformationByHandle(
-                self.as_raw_handle() as HANDLE,
-                FileDispositionInfo,
-                &mut delete_disposition as *mut FILE_DISPOSITION_INFO as *const c_void,
-                mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
-            )
-        };
-        cvt::cvt(bool_result).map(|_v| ())?;
-        // Make it explicit that we're dropping the handle, as that can cause IO
-        // and it makes profile etc easier.
-        mem::drop(self);
-        Ok(())
+    fn delete_by_handle(self) -> std::result::Result<(), (File, io::Error)> {
+        match delete_with_posix(self)
+            .or_else(|(f, e)| {
+                match e.raw_os_error().map(|i| i as u32) {
+                    Some(ERROR_NOT_SUPPORTED)
+                    | Some(ERROR_INVALID_PARAMETER)
+                    | Some(ERROR_INVALID_FUNCTION) => {
+                        // failed and looks like a compatibility issue, try deleting with windows 7 compatible logic
+                        delete_with_win7(f)
+                    }
+                    _ => Err((f, e)),
+                }
+            })
+            .or_else(|(f, e)| match e.kind() {
+                // ACCESSDENIED may mean 'file was readonly'.
+                ErrorKind::PermissionDenied => delete_with_win7_readonly(f, e),
+                _ => Err((f, e)),
+            }) {
+            Ok(f) => {
+                // Make it explicit that we're dropping the handle, as that can
+                // cause IO and it makes profiling easier to have a single
+                // callsite to instrument etc.
+                mem::drop(f);
+                Ok(())
+            }
+            // return the file handle back so the user can take alternative
+            // action if desired.
+            Err((f, e)) => Err((f, e)),
+        }
     }
 }
 
