@@ -39,8 +39,10 @@ use windows_sys::Win32::{
             GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
         },
         WindowsProgramming::{
-            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFO_EX, FILE_DOES_NOT_EXIST,
-            FILE_EXISTS, FILE_OPENED, FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
+            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
+            FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO_EX, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPENED,
+            FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
             FILE_SYNCHRONOUS_IO_NONALERT, OBJECT_ATTRIBUTES,
         },
         IO::DeviceIoControl,
@@ -53,8 +55,7 @@ use exports::SECURITY_CONTEXT_TRACKING_MODE;
 
 use self::windows_sys_gap_defs::{
     reparse_definitions::{REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER},
-    FILE_DISPOSITION_DELETE, FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
-    FILE_DISPOSITION_POSIX_SEMANTICS, SYMLINK_FLAG_RELATIVE,
+    SYMLINK_FLAG_RELATIVE,
 };
 
 pub mod exports {
@@ -152,15 +153,6 @@ pub(crate) mod windows_sys_gap_defs {
             pub DataBuffer: [u16; 1],
         }
     }
-
-    // https://github.com/microsoft/wdkmetadata/issues/22 these are not defined
-    // and should be
-    // pub(crate) const FILE_DISPOSITION_DO_NOT_DELETE: u32 = 0x00000000;
-    pub(crate) const FILE_DISPOSITION_DELETE: u32 = 0x00000001;
-    pub(crate) const FILE_DISPOSITION_POSIX_SEMANTICS: u32 = 0x00000002;
-    // pub(crate) const FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK: u32 = 0x00000004;
-    // pub(crate) const FILE_DISPOSITION_ON_CLOSE: u32 = 0x00000008;
-    pub(crate) const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: u32 = 0x00000010;
 }
 
 #[derive(Clone, Default)]
@@ -1203,9 +1195,9 @@ fn delete_with_posix(f: File) -> std::result::Result<File, (File, io::Error)> {
     // Try for modern delete semantics: POSIX_SEMANTICS and bypass the
     // readonly flag.
     let mut delete_disposition = FILE_DISPOSITION_INFO_EX {
-        Flags: FILE_DISPOSITION_DELETE
-            | FILE_DISPOSITION_POSIX_SEMANTICS
-            | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
+        Flags: FILE_DISPOSITION_FLAG_DELETE
+            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
+            | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
     };
     match cvt::cvt(unsafe {
         SetFileInformationByHandle(
