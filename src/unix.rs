@@ -124,7 +124,7 @@ impl OpenOptionsImpl {
         self._open_at(d, path, flags)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(target_os = "netbsd")))]
     pub fn open_path_at(&self, d: &File, path: &Path) -> Result<File> {
         let flags =
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_PATH | libc::O_CLOEXEC | libc::O_NOCTTY;
