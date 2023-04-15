@@ -182,7 +182,7 @@ dependencies = [
  "smart-default",
  "tempfile",
  "test-log",
- "windows-sys 0.45.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

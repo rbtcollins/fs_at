@@ -41,7 +41,6 @@ aligned = "0.4.1"
 once_cell = { optional = true, version = "1.17.1" }
 smart-default = "0.6.0"
 
-
 [target.'cfg(windows)'.dependencies.windows-sys]
 features = [
     "Win32_Foundation",
@@ -54,4 +53,4 @@ features = [
     "Win32_System_IO",
     "Win32_System_Ioctl",
 ]
-version = "0.45.0"
+version = "0.48.0"

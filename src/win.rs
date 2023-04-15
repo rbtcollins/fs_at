@@ -26,7 +26,7 @@ use windows_sys::Win32::{
         FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
         FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx, NtCreateFile,
         SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
-        FILE_BASIC_INFO, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_WRITE,
+        FILE_BASIC_INFO, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
         FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_OPEN,
         FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
         FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
@@ -35,9 +35,7 @@ use windows_sys::Win32::{
     System::{
         Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
         Kernel::OBJ_CASE_INSENSITIVE,
-        SystemServices::{
-            GENERIC_READ, GENERIC_WRITE, IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK,
-        },
+        SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK},
         WindowsProgramming::{
             FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
             FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
@@ -819,13 +817,13 @@ impl OpenOptionsImpl {
         }
 
         if self.read {
-            desired_access |= GENERIC_READ;
+            desired_access |= FILE_GENERIC_READ;
         }
 
         // rust has match (self.read, self.write, self.append, self.access_mode) {
         desired_access |= match (self.write, None) {
             (.., Some(mode)) => mode,
-            (OpenOptionsWriteMode::Write, None) => GENERIC_WRITE,
+            (OpenOptionsWriteMode::Write, None) => FILE_GENERIC_WRITE,
             (OpenOptionsWriteMode::Append, None) => FILE_GENERIC_WRITE & !FILE_WRITE_DATA,
             _ => 0,
         };
