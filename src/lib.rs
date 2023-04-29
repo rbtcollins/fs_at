@@ -287,20 +287,22 @@ impl OpenOptions {
     /// Opens a directory.
     ///
     /// This is a thin layer over [open_at] which handles the platform specific
-    /// variation involved in opening a directory. Follow handling is
-    /// automatically disabled.
+    /// variation involved in opening a directory. Follow handling defaults off.
     ///
     /// As with [open_at], extension methods can be used to override the
     /// underlying behaviour.
     ///
+    /// Before 0.1.6 follow was always disabled.
+    ///
     /// Platform specific:
     ///
-    /// Windows: sets FILE_FLAG_OPEN_REPARSE_POINT for createOptions, and for
-    /// dwAccessFlag adds in FILE_LIST_DIRECTORY and FILE_TRAVERSE. Further,
-    /// read and write requests are translated to FILE_READ_ATTRIBUTES, and
-    /// FILE_WRITE_ATTRIBUTES|DELETE respectively.
+    /// Windows: sets FILE_FLAG_OPEN_REPARSE_POINT for createOptions when follow
+    /// is disabled, and for dwAccessFlag adds in FILE_LIST_DIRECTORY and
+    /// FILE_TRAVERSE. Further, read and write requests are translated to
+    /// FILE_READ_ATTRIBUTES, and FILE_WRITE_ATTRIBUTES|DELETE respectively.
     ///
-    /// Unix: sets O_NOFOLLOW
+    /// Unix: sets O_NOFOLLOW depending on the  but honours `follow`. Also
+    /// O_PATH on platforms that define it.
     pub fn open_dir_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_dir_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
@@ -1147,6 +1149,12 @@ mod tests {
                 .create_new(true)
                 .write(OpenOptionsWriteMode::Write)
                 .open_at(&dir, "file")?;
+            OpenOptions::default().symlink_at(
+                &parent_dir,
+                "linkname",
+                LinkEntryType::Dir,
+                "dir",
+            )?;
         }
 
         // case 1: no options -> error
@@ -1186,6 +1194,23 @@ mod tests {
             let children =
                 super::read_dir(&mut dir)?.map(|dir_entry| dir_entry.unwrap().name().to_owned());
             assert_eq!(3, children.count());
+        }
+
+        // case 5: we cannot open a directory via a symlink by default
+        {
+            OpenOptions::default()
+                .read(true)
+                .open_dir_at(&parent_dir, "linkname")
+                .unwrap_err();
+        }
+
+        // case 6: but we can if we enable follow
+        {
+            let dir = OpenOptions::default()
+                .read(true)
+                .follow(true)
+                .open_dir_at(&parent_dir, "linkname")?;
+            assert_eq!(reference_time, dir.metadata()?.modified()?);
         }
 
         Ok(())

@@ -120,7 +120,11 @@ impl OpenOptionsImpl {
         if matches!((self.read, self.write), (false, OpenOptionsWriteMode::None)) {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
-        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY;
+        let no_follow_flag = match self.follow {
+            None | Some(false) => libc::O_NOFOLLOW,
+            Some(true) => 0,
+        };
+        let flags = libc::O_RDONLY | no_follow_flag | libc::O_CLOEXEC | libc::O_NOCTTY;
         self._open_at(d, path, flags)
     }
 

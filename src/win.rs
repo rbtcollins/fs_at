@@ -518,6 +518,8 @@ impl OpenOptionsImpl {
             FILE_SYNCHRONOUS_IO_NONALERT
                 | if let Some(CreateOptions(custom_options)) = self.create_options {
                     custom_options
+                } else if matches!(self.follow, Some(true)) {
+                    0
                 } else {
                     FILE_OPEN_REPARSE_POINT
                 },
