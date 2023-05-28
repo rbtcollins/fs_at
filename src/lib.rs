@@ -324,8 +324,8 @@ impl OpenOptions {
     /// Unix: sets O_NOFOLLOW | O_PATH. Many operations on the file handle are
     /// restricted.
     ///
-    /// MacOSX and NetBSD: Not implemented as O_PATH is not defined.
-    #[cfg(all(not(target_os = "macos"), not(target_os = "netbsd")))]
+    /// AIX, MacOSX and NetBSD: Not implemented as O_PATH is not defined.
+    #[cfg(not(any(target_os = "aix", target_os = "macos", target_os = "netbsd")))]
     pub fn open_path_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_path_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
@@ -1216,7 +1216,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(not(target_os = "macos"), not(target_os = "netbsd")))]
+    #[cfg(not(any(target_os = "aix", target_os = "macos", target_os = "netbsd")))]
     #[test]
     fn open_path_at() -> Result<()> {
         let (_tmp, parent_dir, _pathname) = setup()?;
