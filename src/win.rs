@@ -656,7 +656,7 @@ impl OpenOptionsImpl {
                 "non-aligned struct allocation",
             ));
         }
-        let mut reparse_data = &mut aligned[0];
+        let reparse_data = &mut aligned[0];
 
         reparse_data.ReparseTag = IO_REPARSE_TAG_SYMLINK;
 
@@ -1159,20 +1159,20 @@ impl OpenOptionsExt for OpenOptions {
 
     fn security_qos_impersonation(&mut self, level: u32) -> &mut Self {
         self._impl
-            .with_security_qos(|mut qos| qos.ImpersonationLevel = level as i32);
+            .with_security_qos(|qos| qos.ImpersonationLevel = level as i32);
         self
     }
 
     fn security_qos_context_tracking(&mut self, mode: SECURITY_CONTEXT_TRACKING_MODE) -> &mut Self {
         self._impl
-            .with_security_qos(|mut qos| qos.ContextTrackingMode = mode);
+            .with_security_qos(|qos| qos.ContextTrackingMode = mode);
         self
     }
 
     fn security_qos_effective_only(&mut self, effective_only: bool) -> &mut Self {
         let native_value = u8::from(effective_only);
         self._impl
-            .with_security_qos(|mut qos| qos.EffectiveOnly = native_value);
+            .with_security_qos(|qos| qos.EffectiveOnly = native_value);
         self
     }
 }
