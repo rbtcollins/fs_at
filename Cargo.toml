@@ -38,7 +38,7 @@ nix = { version = "0.26.2", default-features = false, features = ["dir"] }
 
 [target.'cfg(windows)'.dependencies]
 aligned = "0.4.1"
-once_cell = { optional = true, version = "1.17.1" }
+once_cell = { optional = true, version = "1.18.0" }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 features = [
