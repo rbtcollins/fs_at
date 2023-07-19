@@ -13,9 +13,11 @@ use std::{
 cfg_if::cfg_if! {
     if #[cfg(any(target_os = "aix",
                  target_os = "macos",
+                 target_os = "dragonfly",
                  target_os = "freebsd",
                  target_os = "ios",
                  target_os = "netbsd",
+                 target_os = "openbsd",
                  target_os = "illumos"))] {
         use libc::openat as openat64;
     } else {
@@ -133,7 +135,7 @@ impl OpenOptionsImpl {
         self._open_at(d, path, flags)
     }
 
-    #[cfg(not(any(target_os = "aix", target_os = "macos", target_os = "ios", target_os = "netbsd")))]
+    #[cfg(not(any(target_os = "aix", target_os = "dragonfly", target_os = "ios", target_os = "macos", target_os = "netbsd", target_os = "openbsd")))]
     pub fn open_path_at(&self, d: &File, path: &Path) -> Result<File> {
         let flags =
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_PATH | libc::O_CLOEXEC | libc::O_NOCTTY;
