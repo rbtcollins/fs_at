@@ -1,8 +1,11 @@
 name: Rust
 
 on:
-  # test every branch, so renovate can automerge cleanly
+  # test renovate branches even without a PR
   push:
+    branches:
+      - main
+      - renovate/*
   pull_request:
     branches: [main]
 jobs:
