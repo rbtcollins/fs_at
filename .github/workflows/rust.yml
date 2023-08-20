@@ -1,5 +1,8 @@
 name: Rust
 
+permissions:
+  contents: read #  to fetch code (actions/checkout)
+
 on:
   # test renovate branches even without a PR
   push:
