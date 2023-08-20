@@ -1,5 +1,8 @@
 name: Rust
 
+permissions:
+  contents: read #  to fetch code (actions/checkout)
+
 on:
   # test renovate branches even without a PR
   push:
@@ -11,21 +14,15 @@ on:
 jobs:
   build-docker:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.nightly }}
+    continue-on-error: ${{ matrix.channel == 'nightly' }}
     strategy:
       fail-fast: true
       matrix:
         channel: ["1.63", stable, nightly]
         target: [x86_64-unknown-freebsd]
-        nightly: [false]
         include:
           - target: x86_64-unknown-freebsd
             run_tests: NO
-          - channel: nightly
-            nightly: true
-        exclude:
-          - channel: nightly
-            nightly: false
     env:
       RUST_BACKTRACE: 1
       CROSS_CONFIG: .github/cross.toml
@@ -54,19 +51,12 @@ jobs:
 
   build-unix:
     runs-on: ${{ matrix.os }}-latest
-    continue-on-error: ${{ matrix.nightly }}
+    continue-on-error: ${{ matrix.channel == 'nightly' }}
     strategy:
       fail-fast: true
       matrix:
         channel: ["1.63", stable, nightly]
         os: [ubuntu, macos]
-        nightly: [false]
-        include:
-          - channel: nightly
-            nightly: true
-        exclude:
-          - channel: nightly
-            nightly: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -131,7 +121,7 @@ jobs:
         run: cargo clippy --all-targets --no-deps -- -D warnings
   build-windows:
     runs-on: windows-latest
-    continue-on-error: ${{ matrix.nightly }}
+    continue-on-error: ${{ matrix.channel == 'nightly' }}
     strategy:
       fail-fast: true
       matrix:
@@ -140,17 +130,11 @@ jobs:
         # CI. Skip unless/until we have a bug report where it matters.
         variant: [msvc]
         channel: ["1.63", stable, nightly]
-        nightly: [false]
         exclude:
           - arch: aarch64
             variant: gnu
           - arch: i686
             variant: gnu
-          - channel: nightly
-            nightly: false
-        include:
-          - channel: nightly
-            nightly: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
