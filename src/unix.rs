@@ -314,6 +314,10 @@ unsafe impl<'a> Send for ReadDirImpl<'a> where Box<libc::DIR>: Send {}
 unsafe impl<'a> Sync for ReadDirImpl<'a> where Box<libc::DIR>: Sync {}
 
 impl<'a> ReadDirImpl<'a> {
+    // The code doesn't use the mutable value, but that is due to the value
+    // being a simple int passed to the kernel. The kernel does change global
+    // state, so the mutable ref is entirely appropriate.
+    #[allow(clippy::needless_pass_by_ref_mut)]
     pub fn new(dir_file: &'a mut File) -> Result<Self> {
         // closedir closes the FD; make a new one that we can close when done with.
         let new_fd =
