@@ -12,6 +12,24 @@
     "prCreation": "immediate",
     "stabilityDays": 3,
     "lockFileMaintenance": {
+        "automerge": true,
         "enabled": true
-    }
+    },
+    "packageRules": [
+        {
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "matchCurrentVersion": "!/^0/",
+            "automerge": true
+        },
+        {
+            "matchUpdateTypes": [
+                "patch"
+            ],
+            "matchCurrentVersion": "/^0\\./",
+            "automerge": true
+        }
+    ]
 }

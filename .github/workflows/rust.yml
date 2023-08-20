@@ -1,20 +1,31 @@
 name: Rust
 
 on:
-  # test every branch, so renovate can automerge cleanly
+  # test renovate branches even without a PR
   push:
+    branches:
+      - main
+      - renovate/*
   pull_request:
     branches: [main]
 jobs:
   build-docker:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.nightly }}
     strategy:
+      fail-fast: true
       matrix:
         channel: ["1.62.1", stable, nightly]
         target: [x86_64-unknown-freebsd]
+        nightly: [false]
         include:
           - target: x86_64-unknown-freebsd
             run_tests: NO
+          - channel: nightly
+            nightly: true
+        exclude:
+          - channel: nightly
+            nightly: false
     env:
       RUST_BACKTRACE: 1
       CROSS_CONFIG: .github/cross.toml
@@ -43,10 +54,19 @@ jobs:
 
   build-unix:
     runs-on: ${{ matrix.os }}-latest
+    continue-on-error: ${{ matrix.nightly }}
     strategy:
+      fail-fast: true
       matrix:
         channel: ["1.62.1", stable, nightly]
         os: [ubuntu, macos]
+        nightly: [false]
+        include:
+          - channel: nightly
+            nightly: true
+        exclude:
+          - channel: nightly
+            nightly: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -111,19 +131,26 @@ jobs:
         run: cargo clippy --all-targets --no-deps -- -D warnings
   build-windows:
     runs-on: windows-latest
+    continue-on-error: ${{ matrix.nightly }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         arch: [i686, x86_64, aarch64]
         # "gnu" on windows isn't particularly interesting/different but very slow in
         # CI. Skip unless/until we have a bug report where it matters.
         variant: [msvc]
         channel: ["1.62.1", stable, nightly]
+        nightly: [false]
         exclude:
           - arch: aarch64
             variant: gnu
           - arch: i686
             variant: gnu
+          - channel: nightly
+            nightly: false
+        include:
+          - channel: nightly
+            nightly: true
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
