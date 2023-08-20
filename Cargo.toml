@@ -30,7 +30,7 @@ tempfile = "3.3.0"
 test-log = "0.2.11"
 
 [target.'cfg(not(windows))'.dependencies]
-libc = "0.2.140"
+libc = "0.2.147"
 # Saves nontrivial unsafe and platform specific code (Darwin vs other Unixes,
 # MAX_PATH and more : consider it weak and something we can remove if expedient
 # later.
