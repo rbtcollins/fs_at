@@ -141,7 +141,8 @@ impl OpenOptionsImpl {
         target_os = "ios",
         target_os = "macos",
         target_os = "netbsd",
-        target_os = "openbsd"
+        target_os = "openbsd",
+        target_os = "illumos"
     )))]
     pub fn open_path_at(&self, d: &File, path: &Path) -> Result<File> {
         let flags =
