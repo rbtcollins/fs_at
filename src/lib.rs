@@ -324,7 +324,8 @@ impl OpenOptions {
     /// Unix: sets O_NOFOLLOW | O_PATH. Many operations on the file handle are
     /// restricted.
     ///
-    /// AIX, DragonFlyBSD, iOS, MacOSX, NetBSD, and OpenBSD: Not implemented as O_PATH is not defined.
+    /// AIX, DragonFlyBSD, iOS, MacOSX, NetBSD, OpenBSD, and illumos: Not
+    /// implemented as O_PATH is not defined.
     #[cfg(not(any(
         target_os = "aix",
         target_os = "dragonfly",
