@@ -324,8 +324,17 @@ impl OpenOptions {
     /// Unix: sets O_NOFOLLOW | O_PATH. Many operations on the file handle are
     /// restricted.
     ///
-    /// AIX, DragonFlyBSD, iOS, MacOSX, NetBSD, and OpenBSD: Not implemented as O_PATH is not defined.
-    #[cfg(not(any(target_os = "aix", target_os = "dragonfly", target_os = "ios", target_os = "macos", target_os = "netbsd", target_os = "openbsd")))]
+    /// AIX, DragonFlyBSD, iOS, MacOSX, NetBSD, OpenBSD, and illumos: Not
+    /// implemented as O_PATH is not defined.
+    #[cfg(not(any(
+        target_os = "aix",
+        target_os = "dragonfly",
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "illumos"
+    )))]
     pub fn open_path_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
             .open_path_at(d, OpenOptions::ensure_rootless(p.as_ref())?)
@@ -521,7 +530,12 @@ pub mod testsupport;
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "netbsd")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "netbsd",
+        target_os = "illumos"
+    )))]
     use std::path::Path;
     use std::{
         ffi::OsStr,
@@ -1216,7 +1230,15 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(any(target_os = "aix", target_os = "dragonfly", target_os = "ios", target_os = "macos", target_os = "netbsd", target_os = "openbsd")))]
+    #[cfg(not(any(
+        target_os = "aix",
+        target_os = "dragonfly",
+        target_os = "ios",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "illumos"
+    )))]
     #[test]
     fn open_path_at() -> Result<()> {
         let (_tmp, parent_dir, _pathname) = setup()?;
