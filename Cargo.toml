@@ -27,7 +27,7 @@ env_logger = "0.10.0"
 fs-set-times = "0.20.0"
 rayon = "1.8.0"
 tempfile = "3.8.0"
-test-log = "0.2.11"
+test-log = "0.2.13"
 
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2.149"
