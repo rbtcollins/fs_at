@@ -18,7 +18,8 @@ cfg_if::cfg_if! {
                  target_os = "ios",
                  target_os = "netbsd",
                  target_os = "openbsd",
-                 target_os = "illumos"))] {
+                 target_os = "illumos",
+                 target_os = "solaris"))] {
         use libc::openat as openat64;
     } else {
         use libc::openat64;
@@ -142,7 +143,8 @@ impl OpenOptionsImpl {
         target_os = "macos",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "illumos"
+        target_os = "illumos",
+        target_os = "solaris"
     )))]
     pub fn open_path_at(&self, d: &File, path: &Path) -> Result<File> {
         let flags =
