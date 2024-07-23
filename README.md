@@ -33,7 +33,7 @@ Truncate+nofollow also varies by platform: See OpenOptions::truncate.
 
 I'll keep this compiling against older rusts as long as it is easy, but not at
 the expense of a lot of code golf, or past CVEs in old releases of dependencies.
-Currently MSRV is 1.63. If there is a lot of interest in older versions I'm open
+Currently MSRV is 1.71. If there is a lot of interest in older versions I'm open
 to patches.
 
 ## Usage

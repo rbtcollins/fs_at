@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        channel: ["1.63", stable, nightly]
+        channel: ["1.71", stable, nightly]
         target: [x86_64-unknown-freebsd]
         include:
           - target: x86_64-unknown-freebsd
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        channel: ["1.63", stable, nightly]
+        channel: ["1.71", stable, nightly]
         os: [ubuntu, macos]
     steps:
       - name: Checkout code
@@ -130,7 +130,7 @@ jobs:
         # "gnu" on windows isn't particularly interesting/different but very slow in
         # CI. Skip unless/until we have a bug report where it matters.
         variant: [msvc]
-        channel: ["1.63", stable, nightly]
+        channel: ["1.71", stable, nightly]
         exclude:
           - arch: aarch64
             variant: gnu
