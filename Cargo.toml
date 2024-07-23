@@ -42,6 +42,9 @@ once_cell = { optional = true, version = "1.19.0" }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
@@ -51,4 +54,4 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_WindowsProgramming",
 ]
-version = "0.48.0"
+version = "0.52.0"
