@@ -15,35 +15,44 @@ use std::{
 use aligned::{Aligned, A8};
 
 use sugar::{NTStatusError, OSUnicodeString};
-use windows_sys::Win32::{
-    Foundation::{
-        ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY, ERROR_INVALID_FUNCTION,
-        ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT, ERROR_NOT_SUPPORTED,
-        ERROR_NO_MORE_FILES, HANDLE, TRUE,
-    },
-    Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
-    Storage::FileSystem::{
-        FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
-        FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx, NtCreateFile,
-        SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
-        FILE_BASIC_INFO, FILE_CREATE, FILE_DISPOSITION_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-        FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_OPEN,
-        FILE_OPEN_IF, FILE_OVERWRITE_IF, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
-        MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYNCHRONIZE,
-    },
-    System::{
-        Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
-        Kernel::OBJ_CASE_INSENSITIVE,
-        SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK},
-        WindowsProgramming::{
-            FILE_CREATED, FILE_DIRECTORY_FILE, FILE_DISPOSITION_FLAG_DELETE,
-            FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-            FILE_DISPOSITION_INFO_EX, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPENED,
-            FILE_OPEN_REPARSE_POINT, FILE_OVERWRITTEN, FILE_SUPERSEDED,
-            FILE_SYNCHRONOUS_IO_NONALERT, OBJECT_ATTRIBUTES,
+use windows_sys::{
+    Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
+        Storage::FileSystem::{
+            NtCreateFile, FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+            FILE_OPEN_REPARSE_POINT, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT,
+            REPARSE_DATA_BUFFER, REPARSE_DATA_BUFFER_0_2, SYMLINK_FLAG_RELATIVE,
         },
-        IO::DeviceIoControl,
+    },
+    Win32::{
+        Foundation::{
+            ERROR_CANT_RESOLVE_FILENAME, ERROR_DIRECTORY, ERROR_INVALID_FUNCTION,
+            ERROR_INVALID_PARAMETER, ERROR_NOT_A_REPARSE_POINT, ERROR_NOT_SUPPORTED,
+            ERROR_NO_MORE_FILES, HANDLE, TRUE,
+        },
+        Security::{SECURITY_DESCRIPTOR, SECURITY_QUALITY_OF_SERVICE},
+        Storage::FileSystem::{
+            FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
+            FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
+            SetFileInformationByHandle, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+            FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
+            FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY,
+            FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA,
+            MAXIMUM_REPARSE_DATA_BUFFER_SIZE, SYNCHRONIZE,
+        },
+        System::{
+            Ioctl::{FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT},
+            Kernel::OBJ_CASE_INSENSITIVE,
+            SystemServices::{IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK},
+            WindowsProgramming::{
+                FILE_CREATED, FILE_DOES_NOT_EXIST, FILE_EXISTS, FILE_OPENED, FILE_OVERWRITTEN,
+                FILE_SUPERSEDED,
+            },
+            IO::DeviceIoControl,
+        },
     },
 };
 
@@ -51,15 +60,10 @@ use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
 use exports::SECURITY_CONTEXT_TRACKING_MODE;
 
-use self::windows_sys_gap_defs::{
-    reparse_definitions::{REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer, REPARSE_DATA_BUFFER},
-    SYMLINK_FLAG_RELATIVE,
-};
-
 pub mod exports {
     pub use super::{FileExt, OpenOptionsExt};
 
-    pub use super::windows_sys_gap_defs::SECURITY_CONTEXT_TRACKING_MODE;
+    pub use windows_sys::Wdk::System::SystemServices::SECURITY_CONTEXT_TRACKING_MODE;
 
     #[doc(no_inline)]
     pub use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
@@ -74,11 +78,13 @@ pub(crate) mod windows_sys_gap_defs {
         },
     };
 
-    // RtlInitUnicodeStringEx isn't available in windows_sys at this time, and
-    // won't be (see https://github.com/microsoft/win32metadata/issues/1461) so
-    // we're going to roll our own. We'll rely on RtlInitUnicodeString to do
-    // this, and just make sure we don't pass it information that would induce
-    // an error.
+    // since windows-sys 0.52 this is available : use
+    // windows_sys::Wdk::Storage::FileSystem::RtlInitUnicodeStringEx; but
+    // haven't had time to switch to it yet. RtlInitUnicodeStringEx isn't
+    // available in windows_sys at this time, and won't be (see
+    // https://github.com/microsoft/win32metadata/issues/1461) so we're going to
+    // roll our own. We'll rely on RtlInitUnicodeString to do this, and just
+    // make sure we don't pass it information that would induce an error.
     pub unsafe fn init_unicode_string(
         destination_string: *mut UNICODE_STRING,
         source_string: &mut [u16],
@@ -90,66 +96,6 @@ pub(crate) mod windows_sys_gap_defs {
         }
         RtlInitUnicodeString(destination_string, source_string.as_mut_ptr());
         STATUS_SUCCESS
-    }
-
-    // SECURITY_CONTEXT_TRACKING_MODE is not available in windows_sys yet, but it's a pretty simple definition
-    // so in order to maintain API compatibility we'll replicate it here. See https://github.com/microsoft/win32metadata/issues/1464
-    #[allow(non_camel_case_types)]
-    pub type SECURITY_CONTEXT_TRACKING_MODE = u8;
-
-    // Usually this is defined in a C header. There is no Rust equivalent of this in windows_sys yet, so we redefine it here.
-    // See https://github.com/microsoft/win32metadata/issues/1462
-    pub const SYMLINK_FLAG_RELATIVE: u32 = 1;
-
-    /// Strictly speaking this should be provided by something like windows_sys, however the definition isn't there,
-    /// so we'll replicate it from the headers. These structures impact safety sensitive code and should only be changed
-    /// in order to more accurately reflect the definition in Ntifs.h
-    /// See https://github.com/microsoft/win32metadata/issues/1463
-    #[allow(non_snake_case)]
-    pub(crate) mod reparse_definitions {
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        pub struct REPARSE_DATA_BUFFER {
-            pub ReparseTag: u32,
-            pub ReparseDataLength: u16,
-            pub Reserved: u16,
-            pub u: REPARSE_DATA_BUFFER_u,
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        pub union REPARSE_DATA_BUFFER_u {
-            pub SymbolicLinkReparseBuffer: REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer,
-            pub MountPointReparseBuffer: REPARSE_DATA_BUFFER_u_MountPointReparseBuffer,
-            pub GenericReparseBuffer: REPARSE_DATA_BUFFER_u_GenericReparseBuffer,
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        pub struct REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer {
-            pub SubstituteNameOffset: u16,
-            pub SubstituteNameLength: u16,
-            pub PrintNameOffset: u16,
-            pub PrintNameLength: u16,
-            pub Flags: u32,
-            pub PathBuffer: [u16; 1],
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        pub struct REPARSE_DATA_BUFFER_u_MountPointReparseBuffer {
-            pub SubstituteNameOffset: u16,
-            pub SubstituteNameLength: u16,
-            pub PrintNameOffset: u16,
-            pub PrintNameLength: u16,
-            pub PathBuffer: [u16; 1],
-        }
-
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        pub struct REPARSE_DATA_BUFFER_u_GenericReparseBuffer {
-            pub DataBuffer: [u16; 1],
-        }
     }
 }
 
@@ -354,7 +300,7 @@ impl OpenOptionsImpl {
             let ntstatus = NtCreateFile(
                 handle.as_mut_ptr(),
                 desired_access,
-                &mut object_attributes,
+                &object_attributes,
                 status_block.as_mut_ptr(),
                 allocation_size_ptr,
                 file_attributes,
@@ -633,8 +579,7 @@ impl OpenOptionsImpl {
         let path_length = print_path.len() + subst_path.len();
 
         // Size of the union, -1 for the 1 byte in-struct array, + path lengths.
-        let reparse_data_length =
-            mem::size_of::<REPARSE_DATA_BUFFER_u_SymbolicLinkReparseBuffer>() - 1 + path_length * 2;
+        let reparse_data_length = mem::size_of::<REPARSE_DATA_BUFFER_0_2>() - 1 + path_length * 2;
         // u32 + USHORT*2
         let reparse_length = reparse_data_length + 8;
         let mut reparse_data_vec: Vec<u8> = vec![0; reparse_length];
@@ -661,20 +606,31 @@ impl OpenOptionsImpl {
 
         reparse_data.ReparseDataLength = to_u16(reparse_data_length)?;
         if !absolute {
-            reparse_data.u.SymbolicLinkReparseBuffer.Flags = SYMLINK_FLAG_RELATIVE;
+            reparse_data.Anonymous.SymbolicLinkReparseBuffer.Flags = SYMLINK_FLAG_RELATIVE;
         }
         reparse_data
-            .u
+            .Anonymous
             .SymbolicLinkReparseBuffer
             .SubstituteNameLength = to_u16(subst_path.len() * 2)?;
         reparse_data
-            .u
+            .Anonymous
             .SymbolicLinkReparseBuffer
             .SubstituteNameOffset = 0;
-        reparse_data.u.SymbolicLinkReparseBuffer.PrintNameLength = to_u16(print_path.len() * 2)?;
-        reparse_data.u.SymbolicLinkReparseBuffer.PrintNameOffset = to_u16(subst_path.len() * 2)?;
-        let path_addr =
-            unsafe { reparse_data.u.SymbolicLinkReparseBuffer.PathBuffer.as_ptr() as *const u8 };
+        reparse_data
+            .Anonymous
+            .SymbolicLinkReparseBuffer
+            .PrintNameLength = to_u16(print_path.len() * 2)?;
+        reparse_data
+            .Anonymous
+            .SymbolicLinkReparseBuffer
+            .PrintNameOffset = to_u16(subst_path.len() * 2)?;
+        let path_addr = unsafe {
+            reparse_data
+                .Anonymous
+                .SymbolicLinkReparseBuffer
+                .PathBuffer
+                .as_ptr() as *const u8
+        };
         let path_offset = unsafe { path_addr.offset_from(aligned.as_ptr() as *const u8) } as usize;
         // copy the strings in:
 
@@ -952,7 +908,7 @@ pub trait OpenOptionsExt {
     use std::os::windows::fs::OpenOptionsExt as StdOpenOptionsExt;
 
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS,FILE_READ_ATTRIBUTES};
-    use windows_sys::Win32::System::WindowsProgramming::FILE_NO_EA_KNOWLEDGE;
+    use windows_sys::Wdk::Storage::FileSystem::FILE_NO_EA_KNOWLEDGE;
 
     use fs_at::OpenOptions;
     use fs_at::os::windows::OpenOptionsExt;
