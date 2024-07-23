@@ -333,7 +333,8 @@ impl OpenOptions {
         target_os = "macos",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "illumos"
+        target_os = "illumos",
+        target_os = "solaris"
     )))]
     pub fn open_path_at<P: AsRef<Path>>(&self, d: &File, p: P) -> Result<File> {
         self._impl
@@ -534,7 +535,8 @@ mod tests {
         target_os = "macos",
         target_os = "ios",
         target_os = "netbsd",
-        target_os = "illumos"
+        target_os = "illumos",
+        target_os = "solaris"
     )))]
     use std::path::Path;
     use std::{
@@ -1237,7 +1239,8 @@ mod tests {
         target_os = "macos",
         target_os = "netbsd",
         target_os = "openbsd",
-        target_os = "illumos"
+        target_os = "illumos",
+        target_os = "solaris"
     )))]
     #[test]
     fn open_path_at() -> Result<()> {
