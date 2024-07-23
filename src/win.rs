@@ -188,7 +188,7 @@ impl fmt::Debug for OpenOptionsImpl {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Default)]
 struct DesiredAccess(u32);
 struct FileOpenDisposition(u32);
 #[derive(Clone, Default)]
@@ -547,14 +547,8 @@ impl OpenOptionsImpl {
     }
 
     pub fn open_path_at(&self, f: &File, path: &Path) -> Result<File> {
-        let desired_access = DesiredAccess(
-            SYNCHRONIZE
-                | if let Some(DesiredAccess(custom_access)) = self.desired_access {
-                    custom_access
-                } else {
-                    0
-                },
-        );
+        let desired_access = DesiredAccess(SYNCHRONIZE | self.desired_access.unwrap_or_default().0);
+
         let create_disposition = self.get_file_disposition(false)?;
         // TODO: create options needs to be controlled through OpenOptions too.
         // FILE_SYNCHRONOUS_IO_NONALERT is set by CreateFile with the options
