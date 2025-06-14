@@ -56,4 +56,4 @@ features = [
     "Win32_System_SystemServices",
     "Win32_System_WindowsProgramming",
 ]
-version = "0.52.0"
+version = "0.60.0"
