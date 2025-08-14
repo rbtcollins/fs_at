@@ -139,6 +139,7 @@ impl OpenOptionsImpl {
     #[cfg(not(any(
         target_os = "aix",
         target_os = "dragonfly",
+        target_os = "hurd",
         target_os = "ios",
         target_os = "macos",
         target_os = "netbsd",
