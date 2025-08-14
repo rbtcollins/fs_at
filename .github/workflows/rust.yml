@@ -27,7 +27,7 @@ jobs:
       RUST_BACKTRACE: 1
       CROSS_CONFIG: .github/cross.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set environment variables appropriately for the build
         run: |
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
@@ -59,7 +59,7 @@ jobs:
         os: [ubuntu, macos]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: rustup default
         run: rustup default ${{ matrix.channel }}
       - name: rustup components
@@ -138,7 +138,7 @@ jobs:
             variant: gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: install msys2
         run: choco install msys2
         if: matrix.variant == 'gnu'
