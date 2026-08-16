@@ -1364,6 +1364,10 @@ pub(crate) struct DirEntryImpl {
 }
 
 impl DirEntryImpl {
+    pub fn file_type_hint(&self) -> Option<crate::FileTypeHint> {
+        None
+    }
+
     pub fn name(&self) -> &OsStr {
         &self.name
     }

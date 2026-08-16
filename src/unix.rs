@@ -29,7 +29,7 @@ cfg_if::cfg_if! {
 use cvt::cvt_r;
 use libc::{c_int, mkdirat, mode_t};
 
-use crate::{LinkEntryType, OpenOptions, OpenOptionsWriteMode};
+use crate::{FileTypeHint, LinkEntryType, OpenOptions, OpenOptionsWriteMode};
 
 pub mod exports {
     pub use super::OpenOptionsExt;
@@ -378,15 +378,19 @@ impl Iterator for ReadDirImpl<'_> {
         nix::Error::clear();
         ptr::NonNull::new(unsafe { libc::readdir(dir) })
             .map(|e| {
+                let entry = unsafe { e.as_ref() };
+                let file_type_hint = file_type_hint(entry);
+
                 Ok(DirEntryImpl {
                     name: unsafe {
                         // Step one: C pointer to CStr - referenced data, length not known.
-                        let c_str = std::ffi::CStr::from_ptr(e.as_ref().d_name.as_ptr());
+                        let c_str = std::ffi::CStr::from_ptr(entry.d_name.as_ptr());
                         // Step two: OsStr: referenced data, length calcu;ated
                         let os_str = OsStr::from_bytes(c_str.to_bytes());
                         // Step three: owned copy
                         os_str.to_os_string()
                     },
+                    file_type_hint,
                 })
             })
             .or_else(|| {
@@ -404,11 +408,70 @@ impl Iterator for ReadDirImpl<'_> {
 #[derive(Debug)]
 pub(crate) struct DirEntryImpl {
     name: OsString,
+    file_type_hint: Option<FileTypeHint>,
 }
 
 impl DirEntryImpl {
+    pub fn file_type_hint(&self) -> Option<FileTypeHint> {
+        self.file_type_hint
+    }
+
     pub fn name(&self) -> &OsStr {
         &self.name
+    }
+}
+
+// Access d_type only on targets where the minimum supported libc crate version
+// exposes it; unlisted targets conservatively return no hint.
+cfg_if::cfg_if! {
+    if #[cfg(any(
+        target_os = "android",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))] {
+        fn file_type_hint(entry: &libc::dirent) -> Option<FileTypeHint> {
+            file_type_hint_from_d_type(entry.d_type)
+        }
+
+        fn file_type_hint_from_d_type(d_type: u8) -> Option<FileTypeHint> {
+            match d_type {
+                libc::DT_UNKNOWN => None,
+                libc::DT_DIR => Some(FileTypeHint::Directory),
+                _ => Some(FileTypeHint::NonDirectory),
+            }
+        }
+
+        #[cfg(test)]
+        mod file_type_hint_tests {
+            #[test]
+            fn mapping() {
+                assert_eq!(
+                    None,
+                    super::file_type_hint_from_d_type(libc::DT_UNKNOWN)
+                );
+                assert_eq!(
+                    Some(crate::FileTypeHint::Directory),
+                    super::file_type_hint_from_d_type(libc::DT_DIR)
+                );
+                assert_eq!(
+                    Some(crate::FileTypeHint::NonDirectory),
+                    super::file_type_hint_from_d_type(libc::DT_REG)
+                );
+                assert_eq!(
+                    Some(crate::FileTypeHint::NonDirectory),
+                    super::file_type_hint_from_d_type(libc::DT_LNK)
+                );
+            }
+        }
+    } else {
+        fn file_type_hint(_entry: &libc::dirent) -> Option<FileTypeHint> {
+            None
+        }
     }
 }
 

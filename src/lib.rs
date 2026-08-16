@@ -473,22 +473,29 @@ impl Iterator for ReadDir<'_> {
 
 /// The returned type for each entry found by [`read_dir`].
 ///
-/// Each entry represents a single entry inside the directory. Platforms that
-/// provide rich metadata may in future expose this through methods or extension
-/// traits on DirEntry.
+/// Each entry represents a single entry inside the directory. Metadata returned
+/// from a directory listing is inherently racy: presuming that what was a dir,
+/// or symlink etc when the directory was listed, will still be the same when
+/// opened is fallible. [`file_type_hint()`] exposes metadata already returned by
+/// the directory listing without performing additional IO, but callers must
+/// handle the entry changing before a subsequent operation.
 ///
-/// For now however, only the [`name()`] is exposed. This does not imply any
-/// additional IO for most workloads: metadata returned from a directory listing
-/// is inherently racy: presuming that what was a dir, or symlink etc when the
-/// directory was listed, will still be the same when opened is fallible.
-/// Instead, use open_at to open the contents, and then process based on the
-/// type of content found.
+/// [`file_type_hint()`]: DirEntry::file_type_hint
 #[derive(Debug)]
 pub struct DirEntry {
     _impl: DirEntryImpl,
 }
 
 impl DirEntry {
+    /// Returns the file type hint supplied by the directory listing.
+    ///
+    /// This method performs no additional IO. `None` means that the platform or
+    /// filesystem did not supply a useful hint. The hint may be stale by the
+    /// time the entry is acted upon.
+    pub fn file_type_hint(&self) -> Option<FileTypeHint> {
+        self._impl.file_type_hint()
+    }
+
     pub fn name(&self) -> &OsStr {
         self._impl.name()
     }
@@ -499,6 +506,16 @@ impl DirEntry {
 /// See [`ReadDir`] and [`DirEntry`] for details.
 pub fn read_dir(d: &mut File) -> Result<ReadDir> {
     ReadDir::new(d)
+}
+
+/// A file type hint returned as part of a directory listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum FileTypeHint {
+    /// The entry was reported as a directory.
+    Directory,
+    /// The entry was reported as a known non-directory type.
+    NonDirectory,
 }
 
 /// File kind indicator
@@ -1117,6 +1134,19 @@ mod tests {
         assert!(dir_present(&children, OsStr::new("1")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("2")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("child")), "{children:?}");
+        let file = children.iter().find(|entry| entry.name() == "1").unwrap();
+        let directory = children
+            .iter()
+            .find(|entry| entry.name() == "child")
+            .unwrap();
+        assert!(matches!(
+            file.file_type_hint(),
+            None | Some(crate::FileTypeHint::NonDirectory)
+        ));
+        assert!(matches!(
+            directory.file_type_hint(),
+            None | Some(crate::FileTypeHint::Directory)
+        ));
 
         {
             let mut child = OpenOptions::default()
