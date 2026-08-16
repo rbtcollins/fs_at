@@ -421,8 +421,8 @@ impl DirEntryImpl {
     }
 }
 
-// Access d_type only where libc::dirent is known to expose it; unlisted targets
-// conservatively return no hint.
+// Access d_type only on targets where the minimum supported libc crate version
+// exposes it; unlisted targets conservatively return no hint.
 cfg_if::cfg_if! {
     if #[cfg(any(
         target_os = "android",
