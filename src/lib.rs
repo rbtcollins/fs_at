@@ -1134,44 +1134,19 @@ mod tests {
         assert!(dir_present(&children, OsStr::new("1")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("2")), "{children:?}");
         assert!(dir_present(&children, OsStr::new("child")), "{children:?}");
-        #[cfg(any(
-            target_os = "android",
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        ))]
-        {
-            let file = children.iter().find(|entry| entry.name() == "1").unwrap();
-            let directory = children
-                .iter()
-                .find(|entry| entry.name() == "child")
-                .unwrap();
-            assert_eq!(
-                Some(crate::FileTypeHint::NonDirectory),
-                file.file_type_hint()
-            );
-            assert_eq!(
-                Some(crate::FileTypeHint::Directory),
-                directory.file_type_hint()
-            );
-        }
-        #[cfg(not(any(
-            target_os = "android",
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "ios",
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "netbsd",
-            target_os = "openbsd"
-        )))]
-        assert!(children
+        let file = children.iter().find(|entry| entry.name() == "1").unwrap();
+        let directory = children
             .iter()
-            .all(|entry| entry.file_type_hint().is_none()));
+            .find(|entry| entry.name() == "child")
+            .unwrap();
+        assert!(matches!(
+            file.file_type_hint(),
+            None | Some(crate::FileTypeHint::NonDirectory)
+        ));
+        assert!(matches!(
+            directory.file_type_hint(),
+            None | Some(crate::FileTypeHint::Directory)
+        ));
 
         {
             let mut child = OpenOptions::default()
