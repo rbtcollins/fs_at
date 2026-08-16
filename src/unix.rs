@@ -421,6 +421,8 @@ impl DirEntryImpl {
     }
 }
 
+// Access d_type only where libc::dirent is known to expose it; unlisted targets
+// conservatively return no hint.
 cfg_if::cfg_if! {
     if #[cfg(any(
         target_os = "android",
